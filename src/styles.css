@@ -7,6 +7,7 @@
 html,
 body,
 #root {
+  interpolate-size: allow-keywords;
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -374,6 +375,94 @@ input {
   line-height: 1.36;
 }
 
+.panel-module {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.panel-module-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.tile-format-select::details-content,
+.layout-options-select::details-content {
+  height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: height 240ms ease, opacity 180ms ease, transform 240ms ease, content-visibility 240ms allow-discrete;
+}
+
+.tile-format-select[open]::details-content,
+.layout-options-select[open]::details-content {
+  height: auto;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.tile-format-select {
+  padding: 0;
+  overflow: visible;
+}
+
+.tile-format-summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  color: var(--text);
+  list-style: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: color 180ms ease, background-color 180ms ease;
+}
+
+.tile-format-summary::-webkit-details-marker {
+  display: none;
+}
+
+.tile-format-summary::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 160ms ease;
+}
+
+.tile-format-select[open] .tile-format-summary::after {
+  transform: rotate(225deg) translate(-2px, -2px);
+}
+
+.tile-format-summary.active {
+  color: var(--primary-dark);
+  background: var(--primary-light);
+}
+
+.tile-format-summary strong {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tile-format-select .tile-card-grid {
+  max-height: min(430px, calc(100dvh - 190px));
+  padding: 8px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
 .template-grid,
 .tile-card-grid {
   display: grid;
@@ -508,8 +597,106 @@ input {
 
 .layout-control {
   display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.layout-module .layout-metrics {
+  margin-top: 0;
+}
+
+.layout-options-select {
+  padding: 0;
+  overflow: hidden;
+}
+
+.layout-options-summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  padding: 14px;
+  padding: 9px 12px;
+  color: var(--primary-dark);
+  list-style: none;
+  cursor: pointer;
+  background: var(--primary-light);
+  transition: color 180ms ease, background-color 180ms ease;
+}
+
+.layout-options-summary::-webkit-details-marker {
+  display: none;
+}
+
+.layout-options-summary::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 160ms ease;
+}
+
+.layout-options-select[open] .layout-options-summary::after {
+  transform: rotate(225deg) translate(-2px, -2px);
+}
+
+.layout-pages-viewport {
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+}
+
+.layout-pages {
+  display: flex;
+  width: 200%;
+  transition: transform 220ms ease;
+}
+
+.layout-page {
+  display: grid;
+  width: 50%;
+  flex: 0 0 50%;
+  gap: 7px;
+  padding: 8px;
+}
+
+.layout-secondary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.layout-secondary-grid button {
+  min-width: 0;
+  min-height: 34px;
+  padding: 5px;
+  color: var(--text-sec);
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.layout-secondary-grid button.active {
+  color: var(--primary-dark);
+  background: var(--primary-light);
+  border-color: var(--primary);
+}
+
+.layout-page-arrow {
+  min-height: 28px;
+  color: var(--primary-dark);
+  background: var(--primary-light);
+  border: 1px solid var(--primary-mid);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 800;
 }
 
 .layout-control-head {
@@ -546,7 +733,7 @@ input {
 
 .origin-mode-grid button {
   min-width: 0;
-  min-height: 38px;
+  min-height: 32px;
   padding: 6px;
   color: var(--text-sec);
   font-size: 17px;
@@ -620,6 +807,51 @@ input {
 
 .layout-move-card {
   gap: 8px;
+  max-height: 230px;
+  overflow: hidden;
+  opacity: 1;
+  transform: translateY(0);
+  transform-origin: top;
+  transition: max-height 240ms ease, opacity 180ms ease, transform 240ms ease, padding 240ms ease, border-width 240ms ease;
+}
+
+.layout-move-card.collapsed {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  pointer-events: none;
+  opacity: 0;
+  border-top-width: 0;
+  border-bottom-width: 0;
+  transform: translateY(-6px);
+}
+
+.layout-move-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.layout-move-heading button {
+  min-height: 28px;
+  padding: 0 9px;
+  color: var(--primary-dark);
+  background: var(--primary-light);
+  border: 1px solid var(--primary-mid);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.layout-move-card h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.18;
 }
 
 .layout-move-card summary {
@@ -643,6 +875,28 @@ input {
   accent-color: var(--primary);
 }
 
+.layout-drag-button {
+  min-height: 32px;
+  color: var(--text-sec);
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.layout-drag-button.active {
+  color: var(--primary-dark);
+  background: var(--primary-light);
+  border-color: var(--primary);
+}
+
+.layout-drag-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .layout-offset-control {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -652,7 +906,7 @@ input {
 .layout-offset-control button {
   display: grid;
   min-width: 0;
-  min-height: 36px;
+  min-height: 30px;
   place-items: center;
   color: var(--text-sec);
   background: var(--bg-white);
@@ -890,7 +1144,10 @@ input {
 }
 
 .promo-card {
-  margin-top: auto;
+  display: flex;
+  min-height: 132px;
+  flex: 1 1 auto;
+  flex-direction: column;
   padding: 12px;
   background: linear-gradient(180deg, #FFFFFF 0%, #F7F5FB 100%);
   border: 1px solid var(--border);
@@ -926,8 +1183,10 @@ input {
 
 .promo-card a {
   display: inline-flex;
+  align-self: flex-start;
   min-height: 30px;
   align-items: center;
+  margin-top: auto;
   padding: 0 10px;
   color: var(--primary-dark);
   text-decoration: none;
@@ -936,6 +1195,86 @@ input {
   border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 700;
+}
+
+@media (min-width: 1021px) {
+  .side-panel > *,
+  .tile-card,
+  .tile-card-preview,
+  .layout-control,
+  .promo-card {
+    transition: min-height 180ms ease, padding 180ms ease, gap 180ms ease, height 180ms ease;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .promo-card,
+  .side-panel:has(.layout-options-select[open]) .promo-card {
+    min-height: 72px;
+    padding: 8px 10px;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .promo-card p,
+  .side-panel:has(.layout-options-select[open]) .promo-card p {
+    display: none;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .promo-card span,
+  .side-panel:has(.layout-options-select[open]) .promo-card span {
+    margin-bottom: 3px;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .promo-card a,
+  .side-panel:has(.layout-options-select[open]) .promo-card a {
+    min-height: 26px;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .layout-move-card,
+  .side-panel:has(.layout-options-select[open]) .layout-move-card {
+    gap: 5px;
+    padding: 7px;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .layout-offset-control button,
+  .side-panel:has(.layout-options-select[open]) .layout-offset-control button,
+  .side-panel:has(.tile-format-select[open]) .layout-drag-button,
+  .side-panel:has(.layout-options-select[open]) .layout-drag-button {
+    min-height: 26px;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .layout-offset-fields input,
+  .side-panel:has(.layout-options-select[open]) .layout-offset-fields input {
+    min-height: 26px;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .tile-format-select .tile-card-grid {
+    max-height: min(258px, 36dvh);
+    gap: 5px;
+    padding: 6px;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .tile-card {
+    min-height: 46px;
+    grid-template-columns: 38px 1fr;
+    padding: 5px;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .tile-card-preview {
+    width: 34px;
+    height: 34px;
+  }
+
+  .side-panel:has(.tile-format-select[open]):has(.layout-options-select[open]) .tile-format-select .tile-card-grid {
+    max-height: min(198px, 28dvh);
+  }
+
+  .side-panel:has(.tile-format-select[open]):has(.layout-options-select[open]) .layout-page {
+    gap: 5px;
+    padding: 6px;
+  }
+
+  .side-panel:has(.tile-format-select[open]):has(.layout-options-select[open]) .origin-mode-grid button,
+  .side-panel:has(.tile-format-select[open]):has(.layout-options-select[open]) .layout-secondary-grid button {
+    min-height: 28px;
+  }
 }
 
 .modal-backdrop {

@@ -18,6 +18,7 @@ import {
   updateSurfaceLayoutOrigin,
   updateSurfaceTileMaterial,
   updateZoneLayoutOffset,
+  updateZoneLayoutPattern,
   updateZoneShape,
   updateZoneTileMaterial,
 } from './projectFactory';
@@ -106,6 +107,17 @@ describe('project factory', () => {
 
     expect(updated.surfaces.find((surface) => surface.id === 'surface-floor')?.zones[0]?.layout.originMode).toBe('tile-center');
     expect(updated.surfaces.find((surface) => surface.id === 'surface-wall-1')?.zones[0]?.layout.originMode).not.toBe('tile-center');
+  });
+
+  it('combines a selected start point with a layout pattern', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const floor = project.surfaces.find((surface) => surface.id === 'surface-floor')!;
+    const zoneId = floor.zones[0]!.id;
+    const withOrigin = updateSurfaceLayoutOrigin(project, floor.id, 'corner-br');
+    const withPattern = updateZoneLayoutPattern(withOrigin, floor.id, zoneId, 'half-offset');
+    const layout = withPattern.surfaces.find((surface) => surface.id === floor.id)!.zones[0]!.layout;
+
+    expect(layout).toMatchObject({ originMode: 'corner-br', pattern: 'half-offset' });
   });
 
   it('stores manual layout offset for one surface', () => {

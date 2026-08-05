@@ -464,6 +464,7 @@ function mergeSurfaceAssignments(nextSurfaces: Surface[], previousSurfaces: Surf
   return nextSurfaces.map((surface) => {
     const previous = previousSurfaces.find((item) => item.id === surface.id) ?? previousSurfaces.find((item) => item.sourceRef && item.sourceRef === surface.sourceRef);
     const previousMaterialId = previous?.zones[0]?.materialId;
+    const previousBaseZone = previous?.zones[0];
     const materialId = previousMaterialId && materialIds.has(previousMaterialId) ? previousMaterialId : fallbackMaterialId;
     const extraZones =
       previous?.type === surface.type
@@ -475,7 +476,19 @@ function mergeSurfaceAssignments(nextSurfaces: Surface[], previousSurfaces: Surf
         : [];
     return {
       ...surface,
-      zones: [...surface.zones.map((zone, index) => (index === 0 ? { ...zone, materialId } : zone)), ...extraZones],
+      zones: [
+        ...surface.zones.map((zone, index) =>
+          index === 0
+            ? {
+                ...zone,
+                materialId,
+                layout: previousBaseZone?.layout ?? zone.layout,
+                manualEdits: previousBaseZone?.manualEdits ?? zone.manualEdits,
+              }
+            : zone,
+        ),
+        ...extraZones,
+      ],
     };
   });
 }

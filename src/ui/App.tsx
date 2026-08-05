@@ -125,6 +125,7 @@ export function App() {
   const [drawingError, setDrawingError] = useState<string | null>(null);
   const [customTileDialogOpen, setCustomTileDialogOpen] = useState(false);
   const [customTileError, setCustomTileError] = useState<string | null>(null);
+  const [tileFormatsOpen, setTileFormatsOpen] = useState(false);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(initialAppState.templatePickerOpen);
   const contourStatus = validateContour(project.room.contour);
   const primaryMaterial = project.materials[0];
@@ -249,6 +250,7 @@ export function App() {
     setCustomTileError(null);
     setHasRoomEdits(true);
     setProject((current) => (activeSurfaceId && activeZoneId ? updateZoneTileMaterial(current, activeSurfaceId, activeZoneId, tile) : activeSurfaceId ? updateSurfaceTileMaterial(current, activeSurfaceId, tile) : updatePrimaryTileMaterial(current, tile)));
+    setTileFormatsOpen(false);
   }
 
   function submitCustomTile(widthCm: string, heightCm: string) {
@@ -271,6 +273,7 @@ export function App() {
     setProject((current) => (activeSurfaceId && activeZoneId ? updateZoneCustomTileMaterial(current, activeSurfaceId, activeZoneId, widthMm, heightMm) : activeSurfaceId ? updateSurfaceCustomTileMaterial(current, activeSurfaceId, widthMm, heightMm) : updatePrimaryCustomTileMaterial(current, widthMm, heightMm)));
     setCustomTileDialogOpen(false);
     setCustomTileError(null);
+    setTileFormatsOpen(false);
   }
 
   function dragWall(index: number, deltaMm: number) {
@@ -529,37 +532,49 @@ export function App() {
 
           {activePanelTab === 'tile' ? (
             <>
-              <section className="panel-card panel-section compact">
-                <h1>Форматы плитки</h1>
-                <div className="tile-card-grid">
-                  {tilePresets.map((tile) => (
-                    <TilePresetCard
-                      active={activeTileMaterial?.presetId === tile.id}
-                      tile={tile}
-                      key={tile.id}
-                      onSelect={() => selectTilePreset(tile)}
-                    />
-                  ))}
-                  <button
-                    type="button"
-                    className={activeTileMaterial && !activeTileMaterial.presetId ? 'tile-card custom-tile-card active' : 'tile-card custom-tile-card'}
-                    onClick={() => {
-                      setCustomTileDialogOpen(true);
-                      setCustomTileError(null);
-                    }}
-                  >
-                    <span className="tile-card-preview custom-preview">
-                      <Plus size={18} />
-                    </span>
-                    <strong>{activeTileMaterial && !activeTileMaterial.presetId ? activeTileMaterial.label : 'Другой размер'}</strong>
-                  </button>
-                </div>
+              <section className="panel-module tile-format-module">
+                <h1 className="panel-module-title">Формат плитки</h1>
+                <details
+                  className="panel-card panel-section tile-format-select"
+                  open={tileFormatsOpen}
+                  onToggle={(event) => setTileFormatsOpen(event.currentTarget.open)}
+                >
+                  <summary className={activeTileMaterial ? 'tile-format-summary active' : 'tile-format-summary'}>
+                    <strong>{activeTileMaterial?.label ?? 'Выберите формат'}</strong>
+                  </summary>
+                  <div className="tile-card-grid">
+                    {tilePresets.map((tile) => (
+                      <TilePresetCard
+                        active={activeTileMaterial?.presetId === tile.id}
+                        tile={tile}
+                        key={tile.id}
+                        onSelect={() => selectTilePreset(tile)}
+                      />
+                    ))}
+                    <button
+                      type="button"
+                      className={activeTileMaterial && !activeTileMaterial.presetId ? 'tile-card custom-tile-card active' : 'tile-card custom-tile-card'}
+                      onClick={() => {
+                        setCustomTileDialogOpen(true);
+                        setCustomTileError(null);
+                      }}
+                    >
+                      <span className="tile-card-preview custom-preview">
+                        <Plus size={18} />
+                      </span>
+                      <strong>{activeTileMaterial && !activeTileMaterial.presetId ? activeTileMaterial.label : 'Другой размер'}</strong>
+                    </button>
+                  </div>
+                </details>
               </section>
 
               <LayoutControl
                 layout={activeZone?.layout}
                 layoutDragEnabled={layoutDragEnabled}
                 material={activeTileMaterial}
+                tileFormatsOpen={tileFormatsOpen}
+                onLayoutOptionsOpen={() => setTileFormatsOpen(false)}
+                onCloseTileFormats={() => setTileFormatsOpen(false)}
                 onOriginModeChange={changeOriginMode}
                 onOffsetInput={setLayoutOriginOffset}
                 onOffsetReset={resetLayoutOffset}
@@ -570,7 +585,6 @@ export function App() {
                 zone={activeZone}
               />
 
-              <PromoCard />
             </>
           ) : null}
 
@@ -1322,11 +1336,11 @@ function WallsLayer({
               );
             })}
             <Rect x={frame.x} y={frame.y} width={frame.width} height={frame.height} stroke={active ? '#8A6AAE' : '#D0D0D8'} strokeWidth={active ? 3 : 1} />
-            <Text x={frame.x} y={frame.y - 22} width={frame.width} align="center" text={frame.name} fill="#6B6B80" fontSize={13} fontStyle="bold" />
+            <Text x={frame.x} y={frame.y - 52} width={frame.width} align="center" text={frame.name} fill="#6B6B80" fontSize={13} fontStyle="bold" />
             {dimensionsVisible ? (
               <DimensionLabel
                 x={frame.x + frame.width / 2}
-                y={frame.y + frame.height + 21}
+                y={frame.y + frame.height + 50}
                 text={`${frame.widthMm} мм`}
                 onClick={() => onEditSegment({ type: 'wall-segment', index: frame.index })}
               />
@@ -1675,10 +1689,10 @@ function FloorEdgeCutLabels({ contour, layout, material, onEditOffset, view }: {
 function EdgeCutLabels({ edgeCuts, height, onEditOffset, width, x, y }: { edgeCuts: LayoutEdgeCuts; height: number; onEditOffset: (edge: keyof LayoutEdgeCuts) => void; width: number; x: number; y: number }) {
   return (
     <Group>
-      <SmallMetricLabel x={x + width / 2} y={y + 16} text={`${edgeCuts.top ?? 0} мм`} onClick={() => onEditOffset('top')} />
-      <SmallMetricLabel x={x + width / 2} y={y + height - 16} text={`${edgeCuts.bottom ?? 0} мм`} onClick={() => onEditOffset('bottom')} />
-      <SmallMetricLabel x={x + 24} y={y + height / 2} text={`${edgeCuts.left ?? 0} мм`} onClick={() => onEditOffset('left')} />
-      <SmallMetricLabel x={x + width - 24} y={y + height / 2} text={`${edgeCuts.right ?? 0} мм`} onClick={() => onEditOffset('right')} />
+      <SmallMetricLabel x={x + width / 2} y={y - 20} text={`${edgeCuts.top ?? 0} мм`} onClick={() => onEditOffset('top')} />
+      <SmallMetricLabel x={x + width / 2} y={y + height + 20} text={`${edgeCuts.bottom ?? 0} мм`} onClick={() => onEditOffset('bottom')} />
+      <SmallMetricLabel x={x - 42} y={y + height / 2} text={`${edgeCuts.left ?? 0} мм`} onClick={() => onEditOffset('left')} />
+      <SmallMetricLabel x={x + width + 42} y={y + height / 2} text={`${edgeCuts.right ?? 0} мм`} onClick={() => onEditOffset('right')} />
     </Group>
   );
 }
@@ -1809,6 +1823,9 @@ function LayoutControl({
   layout,
   layoutDragEnabled,
   material,
+  tileFormatsOpen,
+  onLayoutOptionsOpen,
+  onCloseTileFormats,
   onOriginModeChange,
   onOffsetInput,
   onOffsetReset,
@@ -1821,6 +1838,9 @@ function LayoutControl({
   layout: SurfaceLayout | undefined;
   layoutDragEnabled: boolean;
   material: TileMaterial | null | undefined;
+  tileFormatsOpen: boolean;
+  onLayoutOptionsOpen: () => void;
+  onCloseTileFormats: () => void;
   onOriginModeChange: (originMode: SurfaceLayout['originMode']) => void;
   onOffsetInput: (axis: 'x' | 'y', value: string) => void;
   onOffsetReset: () => void;
@@ -1830,6 +1850,12 @@ function LayoutControl({
   surface: TileProject['surfaces'][number] | null | undefined;
   zone: FinishZone | null | undefined;
 }) {
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [optionsPage, setOptionsPage] = useState<0 | 1>(0);
+
+  useEffect(() => {
+    if (tileFormatsOpen) setOptionsOpen(false);
+  }, [tileFormatsOpen]);
   const modes: Array<{ label: string; title: string; value: SurfaceLayout['originMode'] }> = [
     { label: '↖', title: 'Левый верх', value: 'corner-tl' },
     { label: '↑', title: 'Сверху', value: 'corner-t' },
@@ -1854,71 +1880,119 @@ function LayoutControl({
 
   return (
     <>
-      <section className="panel-card panel-section layout-control">
-        <h1>Раскладка</h1>
-        <div className="layout-control-head">
-          <span>Старт</span>
-        </div>
-        <div className="origin-mode-grid">
-          {modes.map((mode) => (
-            <button
-              key={mode.value}
-              type="button"
-              title={mode.title}
-              aria-label={mode.title}
-              className={zone?.layout.originMode === mode.value ? 'active' : ''}
-              disabled={!zone}
-              onClick={() => onOriginModeChange(mode.value)}
-            >
-              {mode.label}
-            </button>
-          ))}
-        </div>
-        <div className="center-mode-grid">
-          <button type="button" className={zone?.layout.originMode === 'tile-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('tile-center')}>
-            Плитка в центре
-          </button>
-          <button type="button" className={zone?.layout.originMode === 'joint-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('joint-center')}>
-            Шов в центре
-          </button>
-        </div>
-        <div className="layout-pattern-grid">
-          {patterns.map((pattern) => (
-            <button key={pattern.value} type="button" className={zone?.layout.pattern === pattern.value ? 'active' : ''} disabled={!zone} onClick={() => onPatternChange(pattern.value)}>
-              {pattern.label}
-            </button>
-          ))}
-        </div>
+      <section className="panel-module layout-module">
+        <h1 className="panel-module-title">Раскладка</h1>
+        <details
+          className="panel-card panel-section layout-options-select"
+          open={optionsOpen}
+          onToggle={(event) => {
+            const open = event.currentTarget.open;
+            setOptionsOpen(open);
+            if (open) onLayoutOptionsOpen();
+          }}
+        >
+          <summary className="layout-options-summary">
+            <strong>{optionsPage === 0 ? 'Точка старта' : 'Центрирование и схема'}</strong>
+          </summary>
+          <div className="layout-pages-viewport">
+            <div className="layout-pages" style={{ transform: `translateX(-${optionsPage * 50}%)` }}>
+              <div className="layout-page">
+                <div className="origin-mode-grid">
+                  {modes.map((mode) => (
+                    <button
+                      key={mode.value}
+                      type="button"
+                      title={mode.title}
+                      aria-label={mode.title}
+                      className={zone?.layout.originMode === mode.value ? 'active' : ''}
+                      disabled={!zone}
+                      onClick={() => onOriginModeChange(mode.value)}
+                    >
+                      {mode.label}
+                    </button>
+                  ))}
+                </div>
+                <button type="button" className="layout-page-arrow next" aria-label="Показать центрирование и схемы укладки" onClick={() => setOptionsPage(1)}>→</button>
+              </div>
+              <div className="layout-page">
+                <div className="layout-secondary-grid">
+                  <button type="button" className={zone?.layout.originMode === 'tile-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('tile-center')}>Плитка в центре</button>
+                  <button type="button" className={zone?.layout.originMode === 'joint-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('joint-center')}>Шов в центре</button>
+                  {patterns.map((pattern) => (
+                    <button key={pattern.value} type="button" className={zone?.layout.pattern === pattern.value ? 'active' : ''} disabled={!zone} onClick={() => onPatternChange(pattern.value)}>{pattern.label}</button>
+                  ))}
+                  <button
+                    type="button"
+                    disabled={!zone}
+                    onClick={() => {
+                      onOriginModeChange('corner-tl');
+                      onPatternChange('straight');
+                      onOffsetReset();
+                      onToggleLayoutDrag(false);
+                    }}
+                  >
+                    Сбросить
+                  </button>
+                </div>
+                <button type="button" className="layout-page-arrow previous" aria-label="Вернуться к точкам старта" onClick={() => setOptionsPage(0)}>←</button>
+              </div>
+            </div>
+          </div>
+        </details>
         <LayoutMetrics material={material} surface={surface} zone={zone} />
       </section>
-      <details className="panel-card panel-section layout-control layout-move-card" open>
-        <summary>Двигать</summary>
-        <label className="layout-drag-toggle">
-          <input type="checkbox" checked={layoutDragEnabled} disabled={!zone} onChange={(event) => onToggleLayoutDrag(event.currentTarget.checked)} />
-          Двигать мышью
-        </label>
-        <div className="layout-offset-control">
-          <button type="button" aria-label="Сдвинуть влево вверх" disabled={!zone} onClick={() => onOffsetStep(-10, -10)}>↖</button>
-          <button type="button" aria-label="Сдвинуть вверх" disabled={!zone} onClick={() => onOffsetStep(0, -10)}><ArrowUp size={15} /></button>
-          <button type="button" aria-label="Сдвинуть вправо вверх" disabled={!zone} onClick={() => onOffsetStep(10, -10)}>↗</button>
-          <button type="button" aria-label="Сдвинуть влево" disabled={!zone} onClick={() => onOffsetStep(-10, 0)}><ArrowLeft size={15} /></button>
-          <button type="button" aria-label="Сбросить смещение" disabled={!zone} onClick={onOffsetReset}><RotateCcw size={15} /></button>
-          <button type="button" aria-label="Сдвинуть вправо" disabled={!zone} onClick={() => onOffsetStep(10, 0)}><ArrowRight size={15} /></button>
-          <button type="button" aria-label="Сдвинуть влево вниз" disabled={!zone} onClick={() => onOffsetStep(-10, 10)}>↙</button>
-          <button type="button" aria-label="Сдвинуть вниз" disabled={!zone} onClick={() => onOffsetStep(0, 10)}><ArrowDown size={15} /></button>
-          <button type="button" aria-label="Сдвинуть вправо вниз" disabled={!zone} onClick={() => onOffsetStep(10, 10)}>↘</button>
+      <section className="panel-module layout-move-module">
+        <div className="layout-move-heading">
+          <h1 className="panel-module-title">Двигать</h1>
+          {tileFormatsOpen || optionsOpen ? (
+            <button
+              type="button"
+              onClick={() => {
+                onCloseTileFormats();
+                setOptionsOpen(false);
+              }}
+            >
+              Ручное передвижение
+            </button>
+          ) : null}
         </div>
-        <div className="layout-offset-fields">
-          <label>
-            X
-            <input type="number" step={10} value={offsetX} disabled={!zone} onChange={(event) => onOffsetInput('x', event.currentTarget.value)} />
-          </label>
-          <label>
-            Y
-            <input type="number" step={10} value={offsetY} disabled={!zone} onChange={(event) => onOffsetInput('y', event.currentTarget.value)} />
-          </label>
+        <div
+          className={tileFormatsOpen || optionsOpen ? 'panel-card panel-section layout-control layout-move-card collapsed' : 'panel-card panel-section layout-control layout-move-card'}
+          aria-hidden={tileFormatsOpen || optionsOpen}
+        >
+          <button
+            type="button"
+            className={layoutDragEnabled ? 'layout-drag-button active' : 'layout-drag-button'}
+            disabled={!zone}
+            aria-pressed={layoutDragEnabled}
+            onClick={() => onToggleLayoutDrag(!layoutDragEnabled)}
+          >
+            Двигать мышью
+          </button>
+          <div className="layout-offset-control">
+            <button type="button" aria-label="Сдвинуть влево вверх" disabled={!zone} onClick={() => onOffsetStep(-10, -10)}>↖</button>
+            <button type="button" aria-label="Сдвинуть вверх" disabled={!zone} onClick={() => onOffsetStep(0, -10)}><ArrowUp size={15} /></button>
+            <button type="button" aria-label="Сдвинуть вправо вверх" disabled={!zone} onClick={() => onOffsetStep(10, -10)}>↗</button>
+            <button type="button" aria-label="Сдвинуть влево" disabled={!zone} onClick={() => onOffsetStep(-10, 0)}><ArrowLeft size={15} /></button>
+            <button type="button" aria-label="Сбросить смещение" disabled={!zone} onClick={onOffsetReset}><RotateCcw size={15} /></button>
+            <button type="button" aria-label="Сдвинуть вправо" disabled={!zone} onClick={() => onOffsetStep(10, 0)}><ArrowRight size={15} /></button>
+            <button type="button" aria-label="Сдвинуть влево вниз" disabled={!zone} onClick={() => onOffsetStep(-10, 10)}>↙</button>
+            <button type="button" aria-label="Сдвинуть вниз" disabled={!zone} onClick={() => onOffsetStep(0, 10)}><ArrowDown size={15} /></button>
+            <button type="button" aria-label="Сдвинуть вправо вниз" disabled={!zone} onClick={() => onOffsetStep(10, 10)}>↘</button>
+          </div>
+          <div className="layout-offset-fields">
+            <label>
+              X
+              <input type="number" step={10} value={offsetX} disabled={!zone} onChange={(event) => onOffsetInput('x', event.currentTarget.value)} />
+            </label>
+            <label>
+              Y
+              <input type="number" step={10} value={offsetY} disabled={!zone} onChange={(event) => onOffsetInput('y', event.currentTarget.value)} />
+            </label>
+          </div>
         </div>
-      </details>
+      </section>
+      <PromoCard />
     </>
   );
 }
@@ -2139,7 +2213,7 @@ function getWallFrames(project: TileProject, view: PlanViewTransform): WallFrame
   const startX = 170;
   const floorBottomY = Math.max(...project.room.contour.map((point) => view.y(point.y)));
   const startY = calculateWallsStartY(floorBottomY);
-  const gap = mmToCanvas(350);
+  const gap = 96;
   let x = startX;
 
   return walls.map((wall, index) => {
@@ -2204,7 +2278,7 @@ function getInlineEdit(
       max: 15000,
       min: 1,
       target,
-      top: Math.round(viewport.y + (frame.y + frame.height + 21) * canvasScale),
+      top: Math.round(viewport.y + (frame.y + frame.height + 50) * canvasScale),
       value: segmentLength(current, next),
     };
   }
@@ -2236,8 +2310,8 @@ function getLayoutOffsetMetric(
   const rect = getSurfaceRectOnCanvas(surface, zone, view, frames);
   return {
     value,
-    x: target.edge === 'left' ? rect.x + 24 : target.edge === 'right' ? rect.x + rect.width - 24 : rect.x + rect.width / 2,
-    y: target.edge === 'top' ? rect.y + 16 : target.edge === 'bottom' ? rect.y + rect.height - 16 : rect.y + rect.height / 2,
+    x: target.edge === 'left' ? rect.x - 42 : target.edge === 'right' ? rect.x + rect.width + 42 : rect.x + rect.width / 2,
+    y: target.edge === 'top' ? rect.y - 20 : target.edge === 'bottom' ? rect.y + rect.height + 20 : rect.y + rect.height / 2,
   };
 }
 
