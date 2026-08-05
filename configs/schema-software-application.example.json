@@ -1,0 +1,19 @@
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Посчитай плитку",
+  "applicationCategory": "DesignApplication",
+  "operatingSystem": "Web",
+  "url": "https://example.ru/",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "RUB"
+  },
+  "creator": {
+    "@type": "Organization",
+    "name": "Vilray Studio",
+    "url": "https://vilraystudio.ru/"
+  },
+  "description": "Визуальный расчёт и раскладка плитки по полу и стенам помещения."
+}

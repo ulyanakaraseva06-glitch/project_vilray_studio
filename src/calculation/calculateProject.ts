@@ -1,0 +1,173 @@
+import { generatePolygonLayout, generateRectLayout } from '../layout/layoutEngine';
+import type { LayoutEdgeCuts } from '../layout/layoutEngine';
+import type { FinishZone, Surface, TileMaterial, TileProject } from '../types/project';
+
+export interface ZoneCalculation {
+  areaM2: number;
+  boxes: number | null;
+  criticalPieces: number;
+  cutPieces: number;
+  edgeCuts: LayoutEdgeCuts;
+  edgeOffsets: LayoutEdgeCuts;
+  fullPieces: number;
+  materialId: string;
+  minCutMm: number | null;
+  purchasePieces: number;
+  reservePieces: number;
+  surfaceId: string;
+  surfaceName: string;
+  totalPieces: number;
+  truncated: boolean;
+  warnings: string[];
+  zoneId: string;
+  zoneName: string;
+}
+
+export interface MaterialCalculation {
+  areaM2: number;
+  boxes: number | null;
+  material: TileMaterial;
+  purchasePieces: number;
+  reservePieces: number;
+  totalPieces: number;
+  zones: ZoneCalculation[];
+}
+
+export interface ProjectCalculation {
+  criticalPieces: number;
+  cutPieces: number;
+  fullPieces: number;
+  materials: MaterialCalculation[];
+  totalBoxes: number | null;
+  totalAreaM2: number;
+  totalPurchasePieces: number;
+  warnings: string[];
+  zones: ZoneCalculation[];
+}
+
+export function calculateProject(project: TileProject): ProjectCalculation {
+  const zones = project.surfaces.flatMap((surface) =>
+    surface.zones.flatMap((zone) => {
+      const material = project.materials.find((item) => item.id === zone.materialId) ?? project.materials[0];
+      if (!material) return [];
+      const layout = calculateZoneLayout(zone, surface, material);
+      const totalPieces = layout.fullCount + layout.cutCount + layout.criticalCount;
+      const reservePercent = material.reservePercent ?? project.settings.reservePercent;
+      const reservePieces = Math.ceil(totalPieces * (reservePercent / 100));
+      const purchasePieces = totalPieces + reservePieces;
+      return {
+        areaM2: roundM2(layout.usedAreaMm2 / 1_000_000),
+        boxes: calculateBoxes(material, purchasePieces, layout.usedAreaMm2),
+        criticalPieces: layout.criticalCount,
+        cutPieces: layout.cutCount,
+        edgeCuts: layout.edgeCuts,
+        edgeOffsets: layout.edgeOffsets,
+        fullPieces: layout.fullCount,
+        materialId: material.id,
+        minCutMm: layout.minCutMm,
+        purchasePieces,
+        reservePieces,
+        surfaceId: surface.id,
+        surfaceName: surface.name,
+        totalPieces,
+        truncated: layout.truncated,
+        warnings: getZoneWarnings(layout.truncated, material, zone),
+        zoneId: zone.id,
+        zoneName: zone.name,
+      };
+    }),
+  );
+
+  const materials = project.materials.flatMap((material) => {
+    const materialZones = zones.filter((zone) => zone.materialId === material.id);
+    if (!materialZones.length) return [];
+    return {
+      areaM2: roundM2(sum(materialZones.map((zone) => zone.areaM2))),
+      boxes: calculateMaterialBoxes(material, materialZones),
+      material,
+      purchasePieces: sum(materialZones.map((zone) => zone.purchasePieces)),
+      reservePieces: sum(materialZones.map((zone) => zone.reservePieces)),
+      totalPieces: sum(materialZones.map((zone) => zone.totalPieces)),
+      zones: materialZones,
+    };
+  });
+
+  return {
+    criticalPieces: sum(zones.map((zone) => zone.criticalPieces)),
+    cutPieces: sum(zones.map((zone) => zone.cutPieces)),
+    fullPieces: sum(zones.map((zone) => zone.fullPieces)),
+    materials,
+    totalBoxes: sumNullable(materials.map((material) => material.boxes)),
+    totalAreaM2: roundM2(sum(zones.map((zone) => zone.areaM2))),
+    totalPurchasePieces: sum(zones.map((zone) => zone.purchasePieces)),
+    warnings: zones.flatMap((zone) => zone.warnings),
+    zones,
+  };
+}
+
+function calculateZoneLayout(zone: FinishZone, surface: Surface, material: TileMaterial) {
+  const result =
+    zone.shape.type === 'polygon'
+      ? generatePolygonLayout({
+          layout: zone.layout,
+          points: zone.shape.points,
+          tileHeightMm: material.heightMm,
+          tileWidthMm: material.widthMm,
+        })
+      : generateRectLayout({
+          blockedRects: getBlockedRectsForZone(zone, surface),
+          heightMm: zone.shape.heightMm || surface.heightMm,
+          layout: zone.layout,
+          tileHeightMm: material.heightMm,
+          tileWidthMm: material.widthMm,
+          widthMm: zone.shape.widthMm || surface.widthMm,
+        });
+
+  return {
+    ...result,
+    usedAreaMm2: result.pieces.reduce((total, piece) => total + piece.widthMm * piece.heightMm, 0),
+  };
+}
+
+function getBlockedRectsForZone(zone: FinishZone, surface: Surface) {
+  if (surface.type !== 'wall' || zone.shape.type !== 'rect') return [];
+  return surface.openings.map((opening) => ({
+    type: 'rect' as const,
+    xMm: Math.max(0, opening.xMm - zone.shape.xMm),
+    yMm: Math.max(0, opening.yMm - zone.shape.yMm),
+    widthMm: Math.min(opening.widthMm, zone.shape.widthMm),
+    heightMm: Math.min(opening.heightMm, zone.shape.heightMm),
+  }));
+}
+
+function sum(values: number[]): number {
+  return values.reduce((total, value) => total + value, 0);
+}
+
+function roundM2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function calculateBoxes(material: TileMaterial, purchasePieces: number, usedAreaMm2: number): number | null {
+  if (material.piecesPerBox && material.piecesPerBox > 0) return Math.ceil(purchasePieces / material.piecesPerBox);
+  if (material.boxAreaM2 && material.boxAreaM2 > 0) return Math.ceil(usedAreaMm2 / 1_000_000 / material.boxAreaM2);
+  return null;
+}
+
+function calculateMaterialBoxes(material: TileMaterial, zones: ZoneCalculation[]): number | null {
+  if (material.piecesPerBox && material.piecesPerBox > 0) return Math.ceil(sum(zones.map((zone) => zone.purchasePieces)) / material.piecesPerBox);
+  if (material.boxAreaM2 && material.boxAreaM2 > 0) return Math.ceil(sum(zones.map((zone) => zone.areaM2)) / material.boxAreaM2);
+  return null;
+}
+
+function sumNullable(values: Array<number | null>): number | null {
+  const present = values.filter((value): value is number => value !== null);
+  return present.length ? sum(present) : null;
+}
+
+function getZoneWarnings(truncated: boolean, material: TileMaterial, zone: FinishZone): string[] {
+  const warnings: string[] = [];
+  if (truncated) warnings.push(`${zone.name}: сетка обрезана для скорости отображения.`);
+  if (!material.piecesPerBox && !material.boxAreaM2) warnings.push(`${material.label ?? material.name}: не задана упаковка, коробки не считаются.`);
+  return warnings;
+}

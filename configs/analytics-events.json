@@ -1,0 +1,53 @@
+{
+  "allowedParameters": [
+    "templateId",
+    "surfaceType",
+    "tilePresetId",
+    "pattern",
+    "deviceClass",
+    "route",
+    "placementId",
+    "promoProjectId",
+    "errorCode",
+    "surfaceCountBucket"
+  ],
+  "forbiddenParameters": [
+    "roomDimensions",
+    "coordinates",
+    "projectName",
+    "projectJson",
+    "userText",
+    "email",
+    "phone"
+  ],
+  "events": [
+    "service_open",
+    "seo_cta_clicked",
+    "template_selected",
+    "custom_room_started",
+    "room_dimensions_changed",
+    "opening_added",
+    "object_added",
+    "surface_opened",
+    "zone_created",
+    "material_created",
+    "tile_format_selected",
+    "layout_generated",
+    "layout_variant_selected",
+    "layout_moved",
+    "manual_edit_opened",
+    "manual_tile_changed",
+    "calculation_opened",
+    "calculation_completed",
+    "png_exported",
+    "pdf_print_opened",
+    "project_exported",
+    "project_imported",
+    "promo_impression",
+    "promo_click",
+    "promo_dismiss",
+    "geometry_error",
+    "zone_overlap_error",
+    "calculation_incomplete"
+  ]
+}

@@ -1,0 +1,166 @@
+{
+  "package": "poschitay-plitku_mvp-docs_v1.0",
+  "version": "1.0",
+  "files": [
+    {
+      "path": "CHANGELOG.md",
+      "size": 846,
+      "sha256": "3e22387685850d1327d94a757fdeef79fba9a45e65b2df58874738f4f38af843"
+    },
+    {
+      "path": "README.md",
+      "size": 4746,
+      "sha256": "8213b5de90dc36150c067bdfd703b4874de655116b551c9b30451356b3fe84ec"
+    },
+    {
+      "path": "configs/ads-registry.example.json",
+      "size": 1937,
+      "sha256": "02415cf27aa0bc2c4c04b36d97c8a8462ffc943fe205d3378e46da32c0f4b5e2"
+    },
+    {
+      "path": "configs/analytics-events.json",
+      "size": 1068,
+      "sha256": "30dc608fda69508720eb4013d5534e608368066eb0a33f87e874c4577dca8ddf"
+    },
+    {
+      "path": "configs/design-tokens.css",
+      "size": 706,
+      "sha256": "8370259b1427a8501cae2c755ce8b9c141ec345da7469f4080a9bf7b99052225"
+    },
+    {
+      "path": "configs/project-config.example.json",
+      "size": 818,
+      "sha256": "f9fa607b34d1dc89076dd026c17790d0308df410b1586964534f356be55e21fa"
+    },
+    {
+      "path": "configs/room-templates.json",
+      "size": 1337,
+      "sha256": "04f930d86dc9ee2063fe5031de6f194063c510bbd2b363dc42d7b98fca77a072"
+    },
+    {
+      "path": "configs/schema-software-application.example.json",
+      "size": 563,
+      "sha256": "149b103ffaf54a2ee62684cfc8468cc3b513c99b99ce203e922ed88a17dfceea"
+    },
+    {
+      "path": "configs/seo-pages.example.json",
+      "size": 3166,
+      "sha256": "3a9790471e7744eb986e1916ba27178ddeb41dda6fd172d0f8c1621366cb22a6"
+    },
+    {
+      "path": "configs/tile-sizes.json",
+      "size": 1389,
+      "sha256": "5534bd9d2a43a4c226054bbc453ec3dc6741afe0a9dac2a01f09ef2699a6cf14"
+    },
+    {
+      "path": "docs/01_Карта_документов_для_Codex.md",
+      "size": 4012,
+      "sha256": "ce7f50d6a9754c5a7146312b9a8ae90208e5b5c914696635869bd8328cf1ca6f"
+    },
+    {
+      "path": "docs/02_Концепция_продукта.md",
+      "size": 5171,
+      "sha256": "3a8f3be3db6aae0f647dad7c68bc7bd937207ec7e4213b1e7779f5c90cf6ebd7"
+    },
+    {
+      "path": "docs/03_Границы_MVP_и_сценарии.md",
+      "size": 6302,
+      "sha256": "0b335d515c62144e99b1d9a44ef3f6271250634f2ef53dd2866cbb734db5dc30"
+    },
+    {
+      "path": "docs/04_UX_UI_спецификация.md",
+      "size": 10164,
+      "sha256": "e0653dc6f0a76b505a678ac4598a6d2e90077f774a94c4f9f1dfd73474f351d8"
+    },
+    {
+      "path": "docs/05_Функциональные_требования.md",
+      "size": 8629,
+      "sha256": "c978d8154c926759d0390c5e566b661a876d84cc3be75e02ed81e25e1f902df0"
+    },
+    {
+      "path": "docs/06_Логика_раскладки_и_расчета.md",
+      "size": 9241,
+      "sha256": "8d004e9d72cee0f1427c16c432261da44df032aaf0954572375c7d79ccc05d06"
+    },
+    {
+      "path": "docs/07_Модель_данных.md",
+      "size": 3571,
+      "sha256": "cf6d7c33afe4c48ad3f2231442d49ef82fbbfbafd120e8f6aafe736e9c3da0fe"
+    },
+    {
+      "path": "docs/08_Техническая_архитектура.md",
+      "size": 6193,
+      "sha256": "6ed72bf5f2a4a61bf4a5c9e221b99eccb9fe62744796291893238f3223e04db2"
+    },
+    {
+      "path": "docs/09_SEO_GEO_стратегия.md",
+      "size": 10180,
+      "sha256": "0fcef3510df95218b521308bcd411cb4fbe8aa2b5a9df5676579e58e8b465a74"
+    },
+    {
+      "path": "docs/10_SEO_контентная_матрица.md",
+      "size": 5154,
+      "sha256": "0fdb36fbfd7c4ee4cb6dd923d1ee0cadb3173e3f340bb9b15a3b2c6267b5a3a9"
+    },
+    {
+      "path": "docs/11_Реклама_и_экосистема_проектов.md",
+      "size": 5546,
+      "sha256": "dd964863263516d539c3268ea98918c49bf0e38cf106c6e9343f3e9d2c7fb822"
+    },
+    {
+      "path": "docs/12_Аналитика_и_метрики.md",
+      "size": 3519,
+      "sha256": "86104b545bf24b1e8626faac5432b2abcce0583b0001a6ebbb6133353a74827a"
+    },
+    {
+      "path": "docs/13_Тестирование_и_приемка.md",
+      "size": 5008,
+      "sha256": "35a39dd139d0e759f1cac438515eb01e34d026a568de0a0751f748046e18aa1d"
+    },
+    {
+      "path": "docs/14_Этапы_разработки_и_архивы.md",
+      "size": 4449,
+      "sha256": "478d62bf996b547f566a50afe90a5816a01b7a9363538b2c801c5457f7ad27bf"
+    },
+    {
+      "path": "docs/15_Мастер_промпт_для_Codex.md",
+      "size": 3458,
+      "sha256": "7fadf5cd6aa1f703497bcdc3d92e3e28c44ace9a9a5641511e812fd4a6a9391e"
+    },
+    {
+      "path": "docs/16_Риски_и_ограничения.md",
+      "size": 3149,
+      "sha256": "e6464b6282d04e1b30893ba017d0a799cc5dfdbfddfd31ef4d667b2e826e394a"
+    },
+    {
+      "path": "docs/17_Тексты_интерфейса_и_подсказки.md",
+      "size": 4344,
+      "sha256": "a1e2e3b821eea4ef254bb573fe2ef2e0bcc7b01c9fbad495fbb2e5282e08cd95"
+    },
+    {
+      "path": "docs/18_Решения_и_точки_настройки.md",
+      "size": 2132,
+      "sha256": "69e07acc66b0a4ccf7253431aaa7a68f06893810d52993a6f9c030fd138e6db8"
+    },
+    {
+      "path": "docs/99_Полное_ТЗ_MVP.md",
+      "size": 77588,
+      "sha256": "fa4af4c1771bc998905c5f18bfcd57ea5533ae697abee3118fdea7fd248320e6"
+    },
+    {
+      "path": "references/Дизайн_система_Сравни_плитку.md",
+      "size": 29264,
+      "sha256": "792ed31691d5c00a30fb774770dae01dab49b0d2f0ac68e28aa67ecf08ff5e9c"
+    },
+    {
+      "path": "references/Скриншот_Сравни_плитку.png",
+      "size": 2093977,
+      "sha256": "07e3131ef3cf52bfacb1d3b14d74ad56497f36211d8a4aa283d95471ea19d545"
+    },
+    {
+      "path": "sources/SEO_GEO_официальные_источники.md",
+      "size": 1981,
+      "sha256": "3075c9985f747272d9908f7d2cd545845b019066c0446044be0d3ffb1dc59125"
+    }
+  ]
+}

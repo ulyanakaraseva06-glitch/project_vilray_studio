@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="92" viewBox="0 0 280 92" role="img" aria-labelledby="title desc">
+  <title id="title">Посчитай плитку</title>
+  <desc id="desc">Логотип сервиса расчета плитки с плиточной сеткой и измерительной линейкой.</desc>
+  <g fill="none" fill-rule="evenodd">
+    <g transform="translate(8 10)">
+      <rect width="72" height="72" rx="18" fill="#F2EBF9"/>
+      <rect x="15" y="15" width="17" height="17" rx="4" fill="#A385C4"/>
+      <rect x="38" y="15" width="17" height="17" rx="4" fill="#454755"/>
+      <rect x="15" y="38" width="17" height="17" rx="4" fill="#454755"/>
+      <rect x="38" y="38" width="17" height="17" rx="4" fill="#987DB9"/>
+      <path d="M61 18v43h-1" stroke="#A385C4" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M61 61h-28" stroke="#A385C4" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M61 27h-8M61 36h-11M61 45h-8M61 54h-11" stroke="#A385C4" stroke-width="3" stroke-linecap="round"/>
+    </g>
+    <text x="98" y="37" fill="#454755" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="800" letter-spacing="0">ПОСЧИТАЙ</text>
+    <text x="98" y="68" fill="#454755" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="800" letter-spacing="0">ПЛИТКУ</text>
+  </g>
+</svg>

@@ -1,0 +1,65 @@
+{
+  "settings": {
+    "enabled": true,
+    "sessionDismissal": true,
+    "maxVisiblePerScreen": 1,
+    "defaultUtmSource": "poschitay_plitku",
+    "defaultUtmMedium": "internal_promo"
+  },
+  "projects": [
+    {
+      "id": "vilray-studio",
+      "name": "Vilray Studio",
+      "url": "https://vilraystudio.ru/",
+      "campaign": "vilray_studio_services",
+      "title": "Нужен такой калькулятор для вашего бренда?",
+      "description": "Разрабатываем визуализаторы, конфигураторы и сервисы для отделочных материалов.",
+      "cta": "Обсудить проект",
+      "tags": [
+        "b2b",
+        "default",
+        "calculation-complete"
+      ],
+      "placements": [
+        "desktop-panel",
+        "calculation-result",
+        "seo-footer"
+      ]
+    },
+    {
+      "id": "sravni-plitku",
+      "name": "Сравни плитку",
+      "url": "REPLACE_WITH_SRAVNI_URL",
+      "campaign": "sravni_plitku",
+      "title": "Сравните плитку в готовом интерьере",
+      "description": "Посмотрите несколько коллекций в одной сцене и сохраните изображение.",
+      "cta": "Открыть сервис",
+      "tags": [
+        "visualization",
+        "material-selection"
+      ],
+      "placements": [
+        "calculation-result",
+        "seo-footer",
+        "tools-menu"
+      ]
+    },
+    {
+      "id": "plitku-ptf",
+      "name": "Плитку ПТФ",
+      "url": "REPLACE_WITH_PTF_URL",
+      "campaign": "plitku_ptf",
+      "title": "REPLACE_WITH_PTF_TITLE",
+      "description": "REPLACE_WITH_PTF_DESCRIPTION",
+      "cta": "Открыть проект",
+      "tags": [
+        "related-project"
+      ],
+      "placements": [
+        "seo-footer",
+        "tools-menu"
+      ],
+      "enabled": false
+    }
+  ]
+}

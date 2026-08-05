@@ -1,0 +1,34 @@
+{
+  "service": {
+    "id": "poschitay-plitku",
+    "name": "Посчитай плитку",
+    "subtitle": "Визуальный расчёт и раскладка плитки онлайн",
+    "baseUrl": "https://example.ru",
+    "appPath": "/app/",
+    "language": "ru",
+    "brandOwner": "Vilray Studio"
+  },
+  "defaults": {
+    "roomHeightMm": 2700,
+    "groutMm": 2,
+    "reservePercent": 10,
+    "criticalCutMm": 80,
+    "pattern": "straight"
+  },
+  "analytics": {
+    "yandexMetrikaId": "REPLACE_ME",
+    "enabled": false
+  },
+  "features": {
+    "manualTileEdit": true,
+    "halfOffset": true,
+    "advertising": true,
+    "seoStaticPages": true,
+    "googleAnalytics": false
+  },
+  "links": {
+    "privacy": "/privacy/",
+    "contacts": "https://vilraystudio.ru/",
+    "support": "mailto:REPLACE_ME"
+  }
+}
