@@ -102,6 +102,7 @@ export interface RoomArea {
 
 export interface Opening {
   id: string;
+  initialXmm?: number;
   kind: 'door' | 'passage';
   name: string;
   surfaceId: string;

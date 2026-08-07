@@ -20,22 +20,28 @@ import { Circle, Group, Layer, Line, Rect, Stage, Text } from 'react-konva';
 import type Konva from 'konva';
 import { getVisibleTilePresets, templates } from '../config/appConfig';
 import {
-  addAdjacentRoom,
+  addRoomFromContour,
+  addRoomFromTemplate,
   addFloorZone,
   addOpening,
   addPartition,
   addWallZone,
   createProjectFromTemplate,
+  deleteOpening,
   deleteZone,
   ensureProjectDefaults,
   getInitialProject,
   getSurfaceMaterial,
   getZoneMaterial,
+  moveRoomArea,
+  moveRoomAreaWall,
+  moveOpening,
+  resetOpening,
   updatePrimaryCustomTileMaterial,
   updatePrimaryTileMaterial,
   updateRoomContour,
   updateRoomHeight,
-  updateRoomSegmentLength,
+  updateRoomAreaSegmentLength,
   updateSurfaceCustomTileMaterial,
   updateSurfaceLayoutOffset,
   updateSurfaceLayoutOrigin,
@@ -51,12 +57,16 @@ import {
 import { generatePolygonLayout, generateRectLayout, type LayoutEdgeCuts } from '../layout/layoutEngine';
 import { calculateProject } from '../calculation/calculateProject';
 import { clearProject, loadProject, saveProject } from '../project/storage';
-import { getBoundingBox, moveWall, segmentLength, validateContour } from '../project/geometry';
+import { getBoundingBox, segmentLength, validateContour } from '../project/geometry';
 import {
+  buildClosedContour,
   buildClosedOrthogonalContour,
   canCloseContour,
+  constrainFreePoint,
   constrainOrthogonalPoint,
+  constrainOrthogonalResizePoint,
   CUSTOM_DRAW_MAX_POINTS,
+  validateDraftPoint,
 } from '../canvas/drawing';
 import { calculateWallsStartY } from '../canvas/layout';
 import { canvasToMm, gridPxForMm, MINOR_GRID_MM, MM_PER_MAJOR_GRID, mmToCanvas, PX_PER_MM } from '../canvas/scale';
@@ -64,8 +74,8 @@ import { clampZoom, panViewport, resetViewport, type CanvasViewport } from '../c
 import type { FinishZone, LayoutPattern, Opening, PointMm, RoomTemplate, TileMaterial, TileProject, TileSizePreset } from '../types/project';
 
 type EditTarget =
-  | { type: 'floor-segment'; index: number }
-  | { type: 'wall-segment'; index: number }
+  | { type: 'floor-segment'; areaId: string; index: number }
+  | { type: 'wall-segment'; areaId: string; index: number; surfaceId: string }
   | { type: 'wall-height' }
   | { type: 'layout-offset'; edge: keyof LayoutEdgeCuts; surfaceId: string; zoneId: string }
   | null;
@@ -77,8 +87,11 @@ type CanvasLayers = {
   dimensions: boolean;
 };
 
-type DrawingMode = 'idle' | 'custom-room';
+type DrawingMode = 'idle' | 'custom-room' | 'custom-room-review';
+type CustomDrawingMode = 'orthogonal' | 'free';
 type PanelTab = 'tile' | 'room' | 'objects' | 'zones';
+type TilePanelSection = 'format' | 'laying' | 'origin' | 'movement';
+type CustomDrawingTarget = 'primary' | 'additional';
 
 type ConfirmAction = { type: 'reset' } | { type: 'template'; templateId: string } | null;
 
@@ -112,6 +125,7 @@ export function App() {
   const [selectedSurfaceId, setSelectedSurfaceId] = useState<string | null>('surface-floor');
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [selectedWallIndex, setSelectedWallIndex] = useState<number | null>(null);
+  const [selectedOpeningId, setSelectedOpeningId] = useState<string | null>(null);
   const [activePanelTab, setActivePanelTab] = useState<PanelTab>('tile');
   const [layoutDragEnabled, setLayoutDragEnabled] = useState(false);
   const [calculationOpen, setCalculationOpen] = useState(false);
@@ -121,12 +135,17 @@ export function App() {
   const [hasRoomEdits, setHasRoomEdits] = useState(initialAppState.hasRoomEdits);
   const [confirmAction, setConfirmAction] = useState<ConfirmAction>(null);
   const [drawingMode, setDrawingMode] = useState<DrawingMode>('idle');
+  const [customDrawingTarget, setCustomDrawingTarget] = useState<CustomDrawingTarget>('primary');
+  const [customDrawingMode, setCustomDrawingMode] = useState<CustomDrawingMode>('orthogonal');
+  const [drawingToolArmed, setDrawingToolArmed] = useState(true);
   const [draftContour, setDraftContour] = useState<PointMm[]>([]);
+  const [draftWallStart, setDraftWallStart] = useState<PointMm | null>(null);
   const [drawingError, setDrawingError] = useState<string | null>(null);
   const [customTileDialogOpen, setCustomTileDialogOpen] = useState(false);
   const [customTileError, setCustomTileError] = useState<string | null>(null);
-  const [tileFormatsOpen, setTileFormatsOpen] = useState(false);
+  const [openTileSection, setOpenTileSection] = useState<TilePanelSection | null>(null);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(initialAppState.templatePickerOpen);
+  const [addRoomPickerOpen, setAddRoomPickerOpen] = useState(false);
   const contourStatus = validateContour(project.room.contour);
   const primaryMaterial = project.materials[0];
   const activeSurfaceId = selectedSurfaceId;
@@ -149,6 +168,10 @@ export function App() {
     if (!activeSurface.zones.some((zone) => zone.id === selectedZoneId)) setSelectedZoneId(null);
   }, [activeSurface, selectedZoneId]);
 
+  useEffect(() => {
+    if (selectedOpeningId && !project.room.openings?.some((opening) => opening.id === selectedOpeningId)) setSelectedOpeningId(null);
+  }, [project.room.openings, selectedOpeningId]);
+
   function applyTemplate(templateId: string) {
     if (templateId === selectedTemplateId) return;
     if (hasRoomEdits) {
@@ -161,7 +184,7 @@ export function App() {
   function applyTemplateNow(templateId: string) {
     if (templateId === 'custom') {
       setTemplatePickerOpen(false);
-      beginCustomDrawing();
+      beginCustomDrawing('primary');
       return;
     }
     const template = templates.find((item) => item.id === templateId);
@@ -176,57 +199,156 @@ export function App() {
     setProject((current) => createProjectFromTemplate(template, getPreferredTemplateSize(template), current));
   }
 
-  function beginCustomDrawing() {
-    setSelectedTemplateId('custom');
+  function beginCustomDrawing(target: CustomDrawingTarget) {
+    setCustomDrawingTarget(target);
+    if (target === 'primary') setSelectedTemplateId('custom');
     selectSurface(null);
     setEditTarget(null);
     setViewport(resetViewport());
     setLayers({ grid: true, floor: true, walls: false, dimensions: true });
     setDraftContour([]);
+    setDraftWallStart(null);
+    setCustomDrawingMode('orthogonal');
+    setDrawingToolArmed(true);
     setDrawingError(null);
     setDrawingMode('custom-room');
     setHasRoomEdits(false);
   }
 
   function addDraftPoint(point: PointMm) {
-    setDraftContour((current) => {
-      if (current.length >= CUSTOM_DRAW_MAX_POINTS) return current;
-      const nextPoint = constrainOrthogonalPoint(current, point);
-      const previousPoint = current[current.length - 1];
-      if (previousPoint && previousPoint.x === nextPoint.x && previousPoint.y === nextPoint.y) return current;
-      return [...current, nextPoint];
-    });
+    if (!drawingToolArmed) return;
+    if (draftContour.length >= CUSTOM_DRAW_MAX_POINTS) return;
+    if (!draftWallStart) {
+      const previousEnd = draftContour[draftContour.length - 1];
+      const snappedPoint = constrainFreePoint(point);
+      const startPoint = previousEnd && Math.hypot(snappedPoint.x - previousEnd.x, snappedPoint.y - previousEnd.y) <= 250 ? previousEnd : snappedPoint;
+      if (previousEnd && startPoint !== previousEnd) {
+        setDrawingError('Начните следующую стену рядом с концом предыдущей — точки соединятся автоматически.');
+        return;
+      }
+      setDraftWallStart(startPoint);
+      setDrawingError(null);
+      return;
+    }
+    const workingPoints = draftContour.length ? draftContour : [draftWallStart];
+    const nextPoint = customDrawingMode === 'orthogonal' ? constrainOrthogonalPoint(workingPoints, point) : constrainFreePoint(point, workingPoints);
+    const error = validateDraftPoint(workingPoints, nextPoint);
+    if (error) {
+      setDrawingError(error);
+      return;
+    }
+    setDraftContour((current) => current.length ? [...current, nextPoint] : [draftWallStart, nextPoint]);
+    setDraftWallStart(null);
+    setDrawingToolArmed(false);
     setDrawingError(null);
     setHasRoomEdits(true);
   }
 
+  function changeCustomDrawingMode(mode: CustomDrawingMode) {
+    setCustomDrawingMode(mode);
+    setDrawingToolArmed(true);
+    if (!draftWallStart && draftContour.length) setDraftWallStart(draftContour[draftContour.length - 1]);
+    setDrawingError(null);
+  }
+
+  function moveLastDraftPoint(point: PointMm) {
+    if (draftWallStart || draftContour.length < 2) return null;
+    const fixedPoints = draftContour.slice(0, -1);
+    const wallStart = fixedPoints[fixedPoints.length - 1];
+    const currentEnd = draftContour[draftContour.length - 1];
+    const nextPoint = customDrawingMode === 'orthogonal'
+      ? constrainOrthogonalResizePoint(wallStart, currentEnd, point)
+      : constrainFreePoint(point);
+    if (customDrawingMode === 'free' && (nextPoint.x === wallStart.x || nextPoint.y === wallStart.y)) {
+      setDrawingError('Диагональная стена должна оставаться диагональной.');
+      return null;
+    }
+    const error = validateDraftPoint(fixedPoints, nextPoint);
+    if (error) {
+      setDrawingError(error);
+      return null;
+    }
+    setDraftContour((current) => [...current.slice(0, -1), nextPoint]);
+    setDrawingError(null);
+    return nextPoint;
+  }
+
   function undoDraftPoint() {
+    if (draftWallStart) {
+      setDraftWallStart(null);
+      setDrawingError(null);
+      return;
+    }
     setDraftContour((current) => current.slice(0, -1));
     setDrawingError(null);
   }
 
   function cancelCustomDrawing() {
     setDraftContour([]);
+    setDraftWallStart(null);
+    setDrawingToolArmed(true);
     setDrawingError(null);
     setDrawingMode('idle');
+    setCustomDrawingTarget('primary');
     setSelectedTemplateId(project.room.templateId ?? 'custom');
   }
 
   function completeCustomDrawing() {
-    const contour = buildClosedOrthogonalContour(draftContour);
-    if (!contour) return;
+    const hasDiagonalWall = draftContour.some((point, index) => {
+      const next = draftContour[index + 1];
+      return next ? point.x !== next.x && point.y !== next.y : false;
+    });
+    const contour = hasDiagonalWall ? buildClosedContour(draftContour) : buildClosedOrthogonalContour(draftContour);
+    if (!contour) {
+      setDrawingError('Контур нельзя замкнуть: проверьте длину последней стены и пересечения.');
+      return;
+    }
     const validation = validateContour(contour);
     if (!validation.ok) {
       setDrawingError(validation.message ?? 'Контур нельзя завершить.');
       return;
     }
-    setProject((current) => updateRoomContour({ ...current, room: { ...current.room, templateId: null } }, contour));
-    setSelectedTemplateId('custom');
-    selectSurface('surface-floor');
+    setDraftContour(contour);
+    setDraftWallStart(null);
+    setDrawingToolArmed(true);
+    setDrawingError(null);
+    setDrawingMode('custom-room-review');
+  }
+
+  function moveDraftReviewPoint(index: number, point: PointMm) {
+    const nextContour = draftContour.map((current, pointIndex) => pointIndex === index ? { x: Math.round(point.x), y: Math.round(point.y) } : current);
+    const validation = validateContour(nextContour);
+    if (!validation.ok) {
+      setDrawingError('Точки нельзя переместить так, чтобы стены пересекались или контур стал некорректным.');
+      return false;
+    }
+    setDraftContour(nextContour);
+    setDrawingError(null);
+    return true;
+  }
+
+  function saveCustomDrawing() {
+    const validation = validateContour(draftContour);
+    if (!validation.ok) {
+      setDrawingError(validation.message ?? 'Контур нельзя сохранить.');
+      return;
+    }
+    if (customDrawingTarget === 'additional') {
+      const nextAreaId = `room-${(project.room.areas?.length ?? 1) + 1}`;
+      setProject((current) => addRoomFromContour(current, draftContour));
+      selectSurface(`surface-floor-${nextAreaId}`);
+      setActivePanelTab('room');
+    } else {
+      setProject((current) => updateRoomContour({ ...current, room: { ...current.room, templateId: null } }, draftContour));
+      setSelectedTemplateId('custom');
+      selectSurface('surface-floor');
+    }
     setDraftContour([]);
+    setDraftWallStart(null);
     setDrawingError(null);
     setDrawingMode('idle');
-    setLayers({ grid: true, floor: true, walls: false, dimensions: true });
+    setCustomDrawingTarget('primary');
+    setLayers({ grid: true, floor: true, walls: true, dimensions: true });
     setHasRoomEdits(true);
   }
 
@@ -237,11 +359,11 @@ export function App() {
     setProject((current) => updateRoomHeight(current, nextHeight));
   }
 
-  function changeSegmentLength(index: number, value: string) {
+  function changeSegmentLength(target: Extract<Exclude<EditTarget, null>, { type: 'floor-segment' | 'wall-segment' }>, value: string) {
     const length = Number(value);
     if (!Number.isFinite(length)) return;
     setHasRoomEdits(true);
-    setProject((current) => updateRoomSegmentLength(current, index, length));
+    setProject((current) => updateRoomAreaSegmentLength(current, target.areaId, target.index, length));
     setEditTarget(null);
   }
 
@@ -250,7 +372,7 @@ export function App() {
     setCustomTileError(null);
     setHasRoomEdits(true);
     setProject((current) => (activeSurfaceId && activeZoneId ? updateZoneTileMaterial(current, activeSurfaceId, activeZoneId, tile) : activeSurfaceId ? updateSurfaceTileMaterial(current, activeSurfaceId, tile) : updatePrimaryTileMaterial(current, tile)));
-    setTileFormatsOpen(false);
+    setOpenTileSection(null);
   }
 
   function submitCustomTile(widthCm: string, heightCm: string) {
@@ -273,39 +395,37 @@ export function App() {
     setProject((current) => (activeSurfaceId && activeZoneId ? updateZoneCustomTileMaterial(current, activeSurfaceId, activeZoneId, widthMm, heightMm) : activeSurfaceId ? updateSurfaceCustomTileMaterial(current, activeSurfaceId, widthMm, heightMm) : updatePrimaryCustomTileMaterial(current, widthMm, heightMm)));
     setCustomTileDialogOpen(false);
     setCustomTileError(null);
-    setTileFormatsOpen(false);
+    setOpenTileSection(null);
   }
 
-  function dragWall(index: number, deltaMm: number) {
+  function dragWall(areaId: string, index: number, deltaMm: number) {
     setHasRoomEdits(true);
-    setProject((current) => {
-      const contour = moveWall(current.room.contour, index, deltaMm);
-      return {
-        ...updateRoomHeight(
-          {
-            ...current,
-            room: { ...current.room, contour },
-          },
-          current.room.heightMm,
-        ),
-      };
-    });
+    setProject((current) => moveRoomAreaWall(current, areaId, index, deltaMm));
   }
 
   function selectSurface(surfaceId: string | null) {
     setSelectedSurfaceId(surfaceId);
     setSelectedZoneId(null);
-    setSelectedWallIndex(surfaceId?.startsWith('surface-wall-') ? Number(surfaceId.replace('surface-wall-', '')) - 1 : null);
+    setSelectedOpeningId(null);
+    const wallIndex = surfaceId ? project.surfaces.filter((surface) => surface.type === 'wall').findIndex((surface) => surface.id === surfaceId) : -1;
+    setSelectedWallIndex(wallIndex >= 0 ? wallIndex : null);
   }
 
   function selectZone(surfaceId: string, zoneId: string | null) {
     setSelectedSurfaceId(surfaceId);
     setSelectedZoneId(zoneId);
+    setSelectedOpeningId(null);
     setSelectedWallIndex(null);
   }
 
   function selectWall(index: number | null) {
-    selectSurface(index === null ? null : `surface-wall-${index + 1}`);
+    const walls = project.surfaces.filter((surface) => surface.type === 'wall');
+    selectSurface(index === null ? null : walls[index]?.id ?? null);
+  }
+
+  function selectOpening(surfaceId: string, openingId: string) {
+    selectSurface(surfaceId);
+    setSelectedOpeningId(openingId);
   }
 
   function changeOriginMode(originMode: TileProject['surfaces'][number]['zones'][number]['layout']['originMode']) {
@@ -360,15 +480,49 @@ export function App() {
   }
 
   function addRoom() {
+    setAddRoomPickerOpen(true);
+  }
+
+  function selectAdditionalRoomTemplate(templateId: string) {
+    setAddRoomPickerOpen(false);
+    if (templateId === 'custom') {
+      beginCustomDrawing('additional');
+      return;
+    }
+    const template = templates.find((item) => item.id === templateId);
+    if (!template) return;
+    const nextAreaId = `room-${(project.room.areas?.length ?? 1) + 1}`;
     setHasRoomEdits(true);
-    setProject((current) => addAdjacentRoom(current));
+    setProject((current) => addRoomFromTemplate(current, template, getPreferredTemplateSize(template)));
+    selectSurface(`surface-floor-${nextAreaId}`);
     setActivePanelTab('room');
+  }
+
+  function moveAdditionalRoom(areaId: string, deltaXmm: number, deltaYmm: number) {
+    setHasRoomEdits(true);
+    setProject((current) => moveRoomArea(current, areaId, deltaXmm, deltaYmm));
   }
 
   function addSurfaceOpening(kind: Opening['kind']) {
     if (!activeSurfaceId) return;
     setHasRoomEdits(true);
     setProject((current) => addOpening(current, activeSurfaceId, kind));
+  }
+
+  function moveSurfaceOpening(openingId: string, xMm: number) {
+    setHasRoomEdits(true);
+    setProject((current) => moveOpening(current, openingId, xMm));
+  }
+
+  function resetSurfaceOpening(openingId: string) {
+    setHasRoomEdits(true);
+    setProject((current) => resetOpening(current, openingId));
+  }
+
+  function deleteSurfaceOpening(openingId: string) {
+    setHasRoomEdits(true);
+    setProject((current) => deleteOpening(current, openingId));
+    setSelectedOpeningId(null);
   }
 
   function createPartition() {
@@ -491,31 +645,44 @@ export function App() {
       <main className="workspace">
         <section className="canvas-area" aria-label="Рабочее поле">
           <WorkspaceCanvas
-            canCompleteDrawing={canCloseContour(draftContour)}
+            canCompleteDrawing={!draftWallStart && canCloseContour(draftContour)}
             draftContour={draftContour}
+            draftWallStart={draftWallStart}
             drawingError={drawingError}
             drawingMode={drawingMode}
+            drawingToolArmed={drawingToolArmed}
+            customDrawingMode={customDrawingMode}
             editTarget={editTarget}
             layers={layers}
             onAddDraftPoint={addDraftPoint}
             onChangeHeight={changeHeight}
             onCancelDrawing={cancelCustomDrawing}
             onCompleteDrawing={completeCustomDrawing}
+            onCustomDrawingModeChange={changeCustomDrawingMode}
             onEditSegment={setEditTarget}
             onLayersChange={setLayers}
             layoutDragEnabled={layoutDragEnabled}
             onLayoutDrag={shiftLayoutOrigin}
             onLayoutEdgeOffsetChange={setLayoutEdgeOffset}
+            onDeleteOpening={deleteSurfaceOpening}
+            onMoveOpening={moveSurfaceOpening}
             onMoveWall={dragWall}
+            onMoveRoomArea={moveAdditionalRoom}
+            onMoveDraftReviewPoint={moveDraftReviewPoint}
+            onMoveLastDraftPoint={moveLastDraftPoint}
+            onSaveDrawing={saveCustomDrawing}
             onSelectSurface={selectSurface}
+            onSelectOpening={selectOpening}
             onSelectZone={selectZone}
             onSelectWall={selectWall}
             onSubmitSegment={changeSegmentLength}
+            onResetOpening={resetSurfaceOpening}
             onUndoDraftPoint={undoDraftPoint}
             onViewportChange={setViewport}
             onZoneShapeChange={changeZoneShape}
             project={project}
             selectedSurfaceId={selectedSurfaceId}
+            selectedOpeningId={selectedOpeningId}
             selectedZoneId={selectedZoneId}
             selectedWallIndex={selectedWallIndex}
             viewport={viewport}
@@ -536,8 +703,11 @@ export function App() {
                 <h1 className="panel-module-title">Формат плитки</h1>
                 <details
                   className="panel-card panel-section tile-format-select"
-                  open={tileFormatsOpen}
-                  onToggle={(event) => setTileFormatsOpen(event.currentTarget.open)}
+                  open={openTileSection === 'format'}
+                  onToggle={(event) => {
+                    const open = event.currentTarget.open;
+                    setOpenTileSection((current) => open ? 'format' : current === 'format' ? null : current);
+                  }}
                 >
                   <summary className={activeTileMaterial ? 'tile-format-summary active' : 'tile-format-summary'}>
                     <strong>{activeTileMaterial?.label ?? 'Выберите формат'}</strong>
@@ -572,9 +742,8 @@ export function App() {
                 layout={activeZone?.layout}
                 layoutDragEnabled={layoutDragEnabled}
                 material={activeTileMaterial}
-                tileFormatsOpen={tileFormatsOpen}
-                onLayoutOptionsOpen={() => setTileFormatsOpen(false)}
-                onCloseTileFormats={() => setTileFormatsOpen(false)}
+                openSection={openTileSection}
+                onOpenSectionChange={setOpenTileSection}
                 onOriginModeChange={changeOriginMode}
                 onOffsetInput={setLayoutOriginOffset}
                 onOffsetReset={resetLayoutOffset}
@@ -649,6 +818,13 @@ export function App() {
         <TemplatePickerDialog
           onSelect={applyTemplateNow}
           selectedTemplateId={selectedTemplateId}
+        />
+      ) : null}
+
+      {addRoomPickerOpen ? (
+        <TemplatePickerDialog
+          onSelect={selectAdditionalRoomTemplate}
+          selectedTemplateId=""
         />
       ) : null}
 
@@ -782,9 +958,12 @@ function getConfirmDialogCopy(action: ConfirmAction) {
 
 interface WorkspaceCanvasProps {
   canCompleteDrawing: boolean;
+  customDrawingMode: CustomDrawingMode;
   draftContour: PointMm[];
+  draftWallStart: PointMm | null;
   drawingError: string | null;
   drawingMode: DrawingMode;
+  drawingToolArmed: boolean;
   editTarget: EditTarget;
   layers: CanvasLayers;
   layoutDragEnabled: boolean;
@@ -792,20 +971,30 @@ interface WorkspaceCanvasProps {
   onChangeHeight: (value: string) => void;
   onCancelDrawing: () => void;
   onCompleteDrawing: () => void;
+  onCustomDrawingModeChange: (mode: CustomDrawingMode) => void;
   onEditSegment: (target: EditTarget) => void;
   onLayersChange: (layers: CanvasLayers) => void;
   onLayoutDrag: (deltaXmm: number, deltaYmm: number) => void;
   onLayoutEdgeOffsetChange: (surfaceId: string, zoneId: string, edge: keyof LayoutEdgeCuts, value: number) => void;
-  onMoveWall: (index: number, deltaMm: number) => void;
+  onDeleteOpening: (openingId: string) => void;
+  onMoveOpening: (openingId: string, xMm: number) => void;
+  onMoveWall: (areaId: string, index: number, deltaMm: number) => void;
+  onMoveRoomArea: (areaId: string, deltaXmm: number, deltaYmm: number) => void;
+  onMoveDraftReviewPoint: (index: number, point: PointMm) => boolean;
+  onMoveLastDraftPoint: (point: PointMm) => PointMm | null;
+  onSaveDrawing: () => void;
   onSelectSurface: (surfaceId: string | null) => void;
+  onSelectOpening: (surfaceId: string, openingId: string) => void;
   onSelectZone: (surfaceId: string, zoneId: string | null) => void;
   onSelectWall: (index: number | null) => void;
-  onSubmitSegment: (index: number, value: string) => void;
+  onSubmitSegment: (target: Extract<Exclude<EditTarget, null>, { type: 'floor-segment' | 'wall-segment' }>, value: string) => void;
+  onResetOpening: (openingId: string) => void;
   onUndoDraftPoint: () => void;
   onViewportChange: (viewport: CanvasViewport) => void;
   onZoneShapeChange: (surfaceId: string, zoneId: string, patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   project: TileProject;
   selectedSurfaceId: string | null;
+  selectedOpeningId: string | null;
   selectedZoneId: string | null;
   selectedWallIndex: number | null;
   viewport: CanvasViewport;
@@ -813,9 +1002,12 @@ interface WorkspaceCanvasProps {
 
 function WorkspaceCanvas({
   canCompleteDrawing,
+  customDrawingMode,
   draftContour,
+  draftWallStart,
   drawingError,
   drawingMode,
+  drawingToolArmed,
   editTarget,
   layers,
   layoutDragEnabled,
@@ -823,20 +1015,30 @@ function WorkspaceCanvas({
   onChangeHeight,
   onCancelDrawing,
   onCompleteDrawing,
+  onCustomDrawingModeChange,
   onEditSegment,
   onLayersChange,
   onLayoutDrag,
   onLayoutEdgeOffsetChange,
+  onDeleteOpening,
+  onMoveOpening,
   onMoveWall,
+  onMoveRoomArea,
+  onMoveDraftReviewPoint,
+  onMoveLastDraftPoint,
+  onSaveDrawing,
   onSelectSurface,
+  onSelectOpening,
   onSelectZone,
   onSelectWall,
   onSubmitSegment,
+  onResetOpening,
   onUndoDraftPoint,
   onViewportChange,
   onZoneShapeChange,
   project,
   selectedSurfaceId,
+  selectedOpeningId,
   selectedZoneId,
   selectedWallIndex,
   viewport,
@@ -844,6 +1046,7 @@ function WorkspaceCanvas({
   const holderRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState(initialCanvasSize);
   const [editError, setEditError] = useState<string | null>(null);
+  const [draftPointer, setDraftPointer] = useState<PointMm | null>(null);
   const panRef = useRef<{ active: boolean; x: number; y: number }>({ active: false, x: 0, y: 0 });
   const layoutDragRef = useRef<{ active: boolean; x: number; y: number }>({ active: false, x: 0, y: 0 });
   const planView = useMemo(() => getPlanView(project.room.contour), [project.room.contour]);
@@ -887,6 +1090,18 @@ function WorkspaceCanvas({
   }
 
   function movePan(event: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
+    if (drawingMode === 'custom-room') {
+      if (!draftWallStart) {
+        setDraftPointer(null);
+        return;
+      }
+      const pointer = event.target.getStage()?.getPointerPosition();
+      if (!pointer) return;
+      const rawPoint = pointerToDraftPoint(pointer, viewport);
+      const workingPoints = draftContour.length ? draftContour : [draftWallStart];
+      setDraftPointer(customDrawingMode === 'orthogonal' ? constrainOrthogonalPoint(workingPoints, rawPoint) : constrainFreePoint(rawPoint, workingPoints));
+      return;
+    }
     if (layoutDragRef.current.active) {
       const pointer = event.target.getStage()?.getPointerPosition();
       if (!pointer) return;
@@ -925,14 +1140,14 @@ function WorkspaceCanvas({
     } else if (activeEdit.target.type === 'wall-height') {
       onChangeHeight(String(parsed));
     } else {
-      onSubmitSegment(activeEdit.target.index, String(parsed));
+      onSubmitSegment(activeEdit.target, String(parsed));
     }
     setEditError(null);
     onEditSegment(null);
   }
 
   return (
-    <div className="canvas-card" ref={holderRef}>
+    <div className={drawingMode === 'custom-room' && draftWallStart ? 'canvas-card drawing-line-active' : 'canvas-card'} ref={holderRef}>
       <Stage
         width={size.width}
         height={size.height}
@@ -940,7 +1155,10 @@ function WorkspaceCanvas({
         onMouseDown={startPan}
         onMouseMove={movePan}
         onMouseUp={stopPan}
-        onMouseLeave={stopPan}
+        onMouseLeave={() => {
+          stopPan();
+          setDraftPointer(null);
+        }}
         onTouchStart={startPan}
         onTouchMove={movePan}
         onTouchEnd={stopPan}
@@ -953,19 +1171,23 @@ function WorkspaceCanvas({
           <Rect name="pan-bg" x={0} y={0} width={size.width} height={size.height} fill="#FBFBFC" />
           {layers.grid ? <Grid width={size.width} height={size.height} viewport={viewport} /> : null}
           <Group x={viewport.x} y={viewport.y} scaleX={viewport.zoom} scaleY={viewport.zoom}>
-            {drawingMode === 'custom-room' ? <DraftContourLayer points={draftContour} /> : null}
+            {drawingMode === 'custom-room' ? <DraftContourLayer canResizeLastPoint={!drawingToolArmed && !draftWallStart} mode={customDrawingMode} onLastPointMove={onMoveLastDraftPoint} points={draftContour} previewPoint={draftPointer} previewStart={draftWallStart} /> : null}
+            {drawingMode === 'custom-room-review' ? <DraftReviewLayer onPointMove={onMoveDraftReviewPoint} points={draftContour} /> : null}
             {drawingMode === 'idle' && layers.floor ? (
               <FloorLayer
                 dimensionsVisible={layers.dimensions}
                 onEditSegment={onEditSegment}
                 onMoveWall={onMoveWall}
+                onMoveRoomArea={onMoveRoomArea}
                 onSelectSurface={onSelectSurface}
+                onSelectOpening={onSelectOpening}
                 onSelectZone={onSelectZone}
                 onSelectWall={onSelectWall}
                 onEditLayoutOffset={onEditSegment}
                 onZoneShapeChange={onZoneShapeChange}
                 project={project}
                 selectedSurfaceId={selectedSurfaceId}
+                selectedOpeningId={selectedOpeningId}
                 selectedZoneId={selectedZoneId}
                 selectedWallIndex={selectedWallIndex}
                 view={planView}
@@ -976,12 +1198,17 @@ function WorkspaceCanvas({
                 dimensionsVisible={layers.dimensions}
                 frames={wallFrames}
                 onEditSegment={onEditSegment}
+                onDeleteOpening={onDeleteOpening}
+                onMoveOpening={onMoveOpening}
                 onSelectWall={onSelectWall}
+                onSelectOpening={onSelectOpening}
                 onSelectZone={onSelectZone}
                 onEditLayoutOffset={onEditSegment}
                 onZoneShapeChange={onZoneShapeChange}
+                onResetOpening={onResetOpening}
                 project={project}
                 selectedSurfaceId={selectedSurfaceId}
+                selectedOpeningId={selectedOpeningId}
                 selectedZoneId={selectedZoneId}
                 selectedWallIndex={selectedWallIndex}
               />
@@ -1021,17 +1248,31 @@ function WorkspaceCanvas({
       {drawingMode === 'custom-room' ? (
         <div className="drawing-controls">
           <strong>Нарисовать помещение</strong>
-          <span>{draftContour.length ? `${draftContour.length} точ.` : 'Ставьте точки по сетке'}</span>
-          {drawingError ? <em>{drawingError}</em> : null}
-          <button type="button" onClick={onCompleteDrawing} disabled={!canCompleteDrawing}>
+          <div className="drawing-mode-options" role="group" aria-label="Инструмент рисования стен">
+            <button type="button" className={drawingToolArmed && customDrawingMode === 'orthogonal' ? 'active' : ''} onClick={() => onCustomDrawingModeChange('orthogonal')}>Стена</button>
+            <button type="button" className={drawingToolArmed && customDrawingMode === 'free' ? 'active' : ''} onClick={() => onCustomDrawingModeChange('free')}>Диагональ</button>
+          </div>
+          <button type="button" className="drawing-complete" onClick={onCompleteDrawing} disabled={!canCompleteDrawing}>
             Завершить
           </button>
-          <button type="button" onClick={onUndoDraftPoint} disabled={draftContour.length === 0}>
+          <button type="button" onClick={onUndoDraftPoint} disabled={draftContour.length === 0 && !draftWallStart}>
             Отменить точку
           </button>
           <button type="button" onClick={onCancelDrawing}>
             Отмена
           </button>
+          <span>{!drawingToolArmed && draftContour.length ? 'Потяните крайнюю точку или выберите следующую стену' : draftContour.length ? `${draftContour.length} точ.` : 'Кликните, чтобы поставить начало стены'}</span>
+          {drawingError ? <em>{drawingError}</em> : null}
+        </div>
+      ) : null}
+
+      {drawingMode === 'custom-room-review' ? (
+        <div className="drawing-controls drawing-review-controls">
+          <strong>Проверить помещение</strong>
+          <span>Перетаскивайте фиолетовые точки</span>
+          {drawingError ? <em>{drawingError}</em> : null}
+          <button type="button" className="drawing-complete" onClick={onSaveDrawing}>Сохранить</button>
+          <button type="button" onClick={onCancelDrawing}>Отмена</button>
         </div>
       ) : null}
 
@@ -1095,24 +1336,159 @@ function Grid({ width, height, viewport }: { width: number; height: number; view
   return <>{lines}</>;
 }
 
-function DraftContourLayer({ points }: { points: PointMm[] }) {
+function DraftContourLayer({ canResizeLastPoint, mode, onLastPointMove, points, previewPoint, previewStart }: { canResizeLastPoint: boolean; mode: CustomDrawingMode; onLastPointMove: (point: PointMm) => PointMm | null; points: PointMm[]; previewPoint: PointMm | null; previewStart: PointMm | null }) {
   const canvasPoints = points.map(pointToCanvasPoint);
   const linePoints = canvasPoints.flatMap((point) => [point.x, point.y]);
-  const closePreview = points.length >= 4 ? [...linePoints, canvasPoints[0].x, canvasPoints[0].y] : linePoints;
+  const previousPoint = previewStart;
+  const previewCanvasPoint = previewPoint ? pointToCanvasPoint(previewPoint) : null;
+  const previewValidationPoints = points.length ? points : previewStart ? [previewStart] : [];
+  const previewError = previousPoint && previewPoint ? validateDraftPoint(previewValidationPoints, previewPoint) : null;
 
   return (
     <Group>
       <Text x={54} y={54} text="Новый контур" fill="#6B6B80" fontSize={18} />
-      <Text x={54} y={82} text="Ставьте точки по сетке. Линии фиксируются под прямым углом." fill="#8F8FA3" fontSize={14} />
-      {points.length > 1 ? <Line points={closePreview} closed={points.length >= 4} fill={points.length >= 4 ? '#F2EBF9' : undefined} stroke="#A385C4" strokeWidth={4} dash={points.length >= 4 ? undefined : [10, 8]} /> : null}
-      {canvasPoints.map((point, index) => (
-        <Group key={`${point.x}-${point.y}-${index}`}>
-          <Circle x={point.x} y={point.y} radius={7} fill="#8A6AAE" />
-          <Text x={point.x + 10} y={point.y - 18} text={`${index + 1}`} fill="#6B6B80" fontSize={13} />
+      <Text x={54} y={82} text={mode === 'orthogonal' ? 'Стена: только горизонтально или вертикально.' : 'Диагональ: свободное направление без пересечений.'} fill="#8F8FA3" fontSize={14} />
+      {points.length > 1 ? <Line points={linePoints} stroke="#8A6AAE" strokeWidth={5} lineCap="round" lineJoin="round" /> : null}
+      {points.slice(0, -1).map((point, index) => {
+        const next = points[index + 1];
+        const start = pointToCanvasPoint(point);
+        const end = pointToCanvasPoint(next);
+        return <DraftLengthLabel key={`length-${index}`} x={(start.x + end.x) / 2} y={(start.y + end.y) / 2 - 22} text={formatDraftLengthCm(point, next)} />;
+      })}
+      {previousPoint && previewPoint && previewCanvasPoint && (previousPoint.x !== previewPoint.x || previousPoint.y !== previewPoint.y) ? (
+        <Group>
+          {points.length >= 3 && (previewPoint.x === points[0].x || previewPoint.y === points[0].y) ? (
+            <Line
+              points={[previewCanvasPoint.x, previewCanvasPoint.y, pointToCanvasPoint(points[0]).x, pointToCanvasPoint(points[0]).y]}
+              stroke="#A385C4"
+              strokeWidth={1.5}
+              dash={[6, 6]}
+              opacity={0.7}
+            />
+          ) : null}
+          <Line
+            points={[...Object.values(pointToCanvasPoint(previousPoint)), previewCanvasPoint.x, previewCanvasPoint.y]}
+            stroke={previewError ? '#C85B72' : '#A385C4'}
+            strokeWidth={4}
+            dash={[10, 7]}
+            lineCap="round"
+          />
+          <DraftLengthLabel
+            error={Boolean(previewError)}
+            x={(pointToCanvasPoint(previousPoint).x + previewCanvasPoint.x) / 2}
+            y={(pointToCanvasPoint(previousPoint).y + previewCanvasPoint.y) / 2 - 22}
+            text={formatDraftLengthCm(previousPoint, previewPoint)}
+          />
+          <Circle
+            x={previewCanvasPoint.x}
+            y={previewCanvasPoint.y}
+            radius={7}
+            fill="#8A6AAE"
+            stroke="#FFFFFF"
+            strokeWidth={2}
+            shadowColor="rgba(111, 79, 147, 0.38)"
+            shadowBlur={8}
+          />
         </Group>
+      ) : null}
+      {canvasPoints.map((point, index) => (
+        <Circle
+          key={`draft-point-${index}`}
+          x={point.x}
+          y={point.y}
+          radius={canResizeLastPoint && index === canvasPoints.length - 1 ? 9 : 7}
+          fill="#8A6AAE"
+          stroke={canResizeLastPoint && index === canvasPoints.length - 1 ? '#FFFFFF' : undefined}
+          strokeWidth={2}
+          shadowColor="rgba(111, 79, 147, 0.38)"
+          shadowBlur={canResizeLastPoint && index === canvasPoints.length - 1 ? 8 : 0}
+          draggable={canResizeLastPoint && index === canvasPoints.length - 1}
+          onMouseEnter={(event) => {
+            if (!canResizeLastPoint || index !== canvasPoints.length - 1) return;
+            const container = event.target.getStage()?.container();
+            if (container) container.style.cursor = 'grab';
+          }}
+          onMouseLeave={(event) => {
+            const container = event.target.getStage()?.container();
+            if (container) container.style.cursor = '';
+          }}
+          onDragMove={(event) => {
+            if (!canResizeLastPoint || index !== canvasPoints.length - 1) return;
+            const node = event.target;
+            const acceptedPoint = onLastPointMove({
+              x: canvasToMm(node.x() - PLAN_OFFSET_X),
+              y: canvasToMm(node.y() - PLAN_OFFSET_Y),
+            });
+            node.position(acceptedPoint ? pointToCanvasPoint(acceptedPoint) : point);
+          }}
+        />
+      ))}
+      {previewStart && !points.some((point) => point.x === previewStart.x && point.y === previewStart.y) ? (
+        <Circle {...pointToCanvasPoint(previewStart)} radius={7} fill="#8A6AAE" />
+      ) : null}
+    </Group>
+  );
+}
+
+function DraftReviewLayer({ onPointMove, points }: { onPointMove: (index: number, point: PointMm) => boolean; points: PointMm[] }) {
+  const canvasPoints = points.map(pointToCanvasPoint);
+  return (
+    <Group>
+      <Text x={54} y={54} text="Проверка помещения" fill="#6B6B80" fontSize={18} />
+      <Text x={54} y={82} text="Перетаскивайте точки. Пересечение стен запрещено." fill="#8F8FA3" fontSize={14} />
+      <Line points={canvasPoints.flatMap((point) => [point.x, point.y])} closed fill="#F2EBF9" stroke="#8A6AAE" strokeWidth={5} lineJoin="round" />
+      {points.map((point, index) => {
+        const next = points[(index + 1) % points.length];
+        const startCanvas = pointToCanvasPoint(point);
+        const endCanvas = pointToCanvasPoint(next);
+        return <DraftLengthLabel key={`review-length-${index}`} x={(startCanvas.x + endCanvas.x) / 2} y={(startCanvas.y + endCanvas.y) / 2 - 22} text={formatDraftLengthCm(point, next)} />;
+      })}
+      {canvasPoints.map((canvasPoint, index) => (
+        <Circle
+          key={`review-point-${index}`}
+          x={canvasPoint.x}
+          y={canvasPoint.y}
+          radius={9}
+          fill="#8A6AAE"
+          stroke="#FFFFFF"
+          strokeWidth={2}
+          shadowColor="rgba(111, 79, 147, 0.40)"
+          shadowBlur={8}
+          draggable
+          onMouseEnter={(event) => {
+            const container = event.target.getStage()?.container();
+            if (container) container.style.cursor = 'grab';
+          }}
+          onMouseLeave={(event) => {
+            const container = event.target.getStage()?.container();
+            if (container) container.style.cursor = '';
+          }}
+          onDragMove={(event) => {
+            const node = event.target;
+            const accepted = onPointMove(index, {
+              x: canvasToMm(node.x() - PLAN_OFFSET_X),
+              y: canvasToMm(node.y() - PLAN_OFFSET_Y),
+            });
+            if (!accepted) node.position(canvasPoint);
+          }}
+        />
       ))}
     </Group>
   );
+}
+
+function DraftLengthLabel({ error = false, text, x, y }: { error?: boolean; text: string; x: number; y: number }) {
+  return (
+    <Group x={x} y={y}>
+      <Rect x={-54} y={-11} width={108} height={22} fill="#FFFFFF" stroke={error ? '#C85B72' : '#D9D9E2'} strokeWidth={1} cornerRadius={4} shadowColor="rgba(30, 30, 40, 0.10)" shadowBlur={5} />
+      <Text x={-52} y={-7} width={104} align="center" text={text} fill={error ? '#A83F57' : '#4D4D59'} fontSize={12} />
+    </Group>
+  );
+}
+
+function formatDraftLengthCm(start: PointMm, end: PointMm) {
+  const totalMm = Math.round(Math.hypot(end.x - start.x, end.y - start.y));
+  return `${Math.floor(totalMm / 10)} см, ${totalMm % 10} мм`;
 }
 
 function pointToCanvasPoint(point: PointMm) {
@@ -1123,19 +1499,22 @@ interface FloorLayerProps {
   dimensionsVisible: boolean;
   onEditSegment: (target: EditTarget) => void;
   onEditLayoutOffset: (target: EditTarget) => void;
-  onMoveWall: (index: number, deltaMm: number) => void;
+  onMoveWall: (areaId: string, index: number, deltaMm: number) => void;
+  onMoveRoomArea: (areaId: string, deltaXmm: number, deltaYmm: number) => void;
+  onSelectOpening: (surfaceId: string, openingId: string) => void;
   onSelectSurface: (surfaceId: string | null) => void;
   onSelectZone: (surfaceId: string, zoneId: string | null) => void;
   onSelectWall: (index: number | null) => void;
   onZoneShapeChange: (surfaceId: string, zoneId: string, patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   project: TileProject;
+  selectedOpeningId: string | null;
   selectedSurfaceId: string | null;
   selectedZoneId: string | null;
   selectedWallIndex: number | null;
   view: PlanViewTransform;
 }
 
-function FloorLayer({ dimensionsVisible, onEditSegment, onEditLayoutOffset, onMoveWall, onSelectSurface, onSelectZone, onSelectWall, onZoneShapeChange, project, selectedSurfaceId, selectedZoneId, selectedWallIndex, view }: FloorLayerProps) {
+function FloorLayer({ dimensionsVisible, onEditSegment, onEditLayoutOffset, onMoveRoomArea, onMoveWall, onSelectOpening, onSelectSurface, onSelectZone, onSelectWall, onZoneShapeChange, project, selectedOpeningId, selectedSurfaceId, selectedZoneId, selectedWallIndex, view }: FloorLayerProps) {
   const points = project.room.contour.flatMap((point) => [view.x(point.x), view.y(point.y)]);
   const floor = project.surfaces.find((surface) => surface.id === 'surface-floor');
   const extraFloors = project.surfaces.filter((surface) => surface.type === 'floor' && surface.id !== 'surface-floor');
@@ -1145,20 +1524,35 @@ function FloorLayer({ dimensionsVisible, onEditSegment, onEditLayoutOffset, onMo
   const active = selectedSurfaceId === 'surface-floor';
   const baseActive = active && !selectedZoneId;
   const layoutOpacity = selectedSurfaceId && !active ? 0.32 : selectedZoneId ? 0.34 : 1;
+  const primaryAreaId = project.room.areas?.[0]?.id ?? 'room-1';
+  const wallSurfaces = project.surfaces.filter((surface) => surface.type === 'wall');
 
   return (
     <Group>
       <Text x={54} y={54} text="Пол" fill="#6B6B80" fontSize={18} />
       <Line points={points} closed fill={active ? '#F2EBF9' : '#FFFFFF'} stroke="#A385C4" strokeWidth={active ? 6 : 4} onClick={() => onSelectSurface('surface-floor')} onTap={() => onSelectSurface('surface-floor')} />
       {floor && material && layout ? <FloorTileLayout contour={project.room.contour} layout={layout} material={material} opacity={layoutOpacity} view={view} /> : null}
+      <FloorOpeningMarkers areaId={primaryAreaId} contour={project.room.contour} onSelectOpening={onSelectOpening} project={project} selectedOpeningId={selectedOpeningId} view={view} />
       {extraFloors.map((surface) => {
         const zone = surface.zones[0];
         const zoneMaterial = zone?.materialId ? project.materials.find((item) => item.id === zone.materialId) : null;
         const contour = zone?.shape.type === 'polygon' ? zone.shape.points : null;
         const surfaceActive = selectedSurfaceId === surface.id;
+        const areaId = surface.sourceRef?.startsWith('floor:') ? surface.sourceRef.slice('floor:'.length) : null;
         if (!zone || !zoneMaterial || !contour) return null;
         return (
-          <Group key={surface.id}>
+          <Group
+            key={surface.id}
+            draggable={Boolean(areaId)}
+            onDragEnd={(event) => {
+              if (!areaId) return;
+              const node = event.currentTarget;
+              const deltaXmm = Math.round(node.x() / view.scale);
+              const deltaYmm = Math.round(node.y() / view.scale);
+              node.position({ x: 0, y: 0 });
+              if (deltaXmm || deltaYmm) onMoveRoomArea(areaId, deltaXmm, deltaYmm);
+            }}
+          >
             <Line
               points={contour.flatMap((point) => [view.x(point.x), view.y(point.y)])}
               closed
@@ -1169,6 +1563,12 @@ function FloorLayer({ dimensionsVisible, onEditSegment, onEditLayoutOffset, onMo
               onTap={() => onSelectSurface(surface.id)}
             />
             <FloorTileLayout contour={contour} layout={zone.layout} material={zoneMaterial} opacity={selectedSurfaceId && !surfaceActive ? 0.32 : 1} view={view} />
+            <FloorOpeningMarkers areaId={areaId ?? 'room-1'} contour={contour} onSelectOpening={onSelectOpening} project={project} selectedOpeningId={selectedOpeningId} view={view} />
+            {dimensionsVisible ? contour.map((point, index) => {
+              const next = contour[(index + 1) % contour.length];
+              const label = getFloorDimensionPosition(contour, index, view);
+              return <DimensionLabel key={`${surface.id}-dimension-${index}`} x={label.x} y={label.y} text={`${segmentLength(point, next)} мм`} onClick={() => areaId && onEditSegment({ type: 'floor-segment', areaId, index })} />;
+            }) : null}
             {surfaceActive && !selectedZoneId ? (
               <FloorEdgeCutLabels
                 contour={contour}
@@ -1178,6 +1578,36 @@ function FloorLayer({ dimensionsVisible, onEditSegment, onEditLayoutOffset, onMo
                 view={view}
               />
             ) : null}
+            {areaId ? contour.map((point, index) => {
+              const next = contour[(index + 1) % contour.length];
+              const horizontal = point.y === next.y;
+              const wallSurfaceId = `surface-wall-${areaId}-${index + 1}`;
+              const wallIndex = wallSurfaces.findIndex((wall) => wall.id === wallSurfaceId);
+              const selected = selectedSurfaceId === wallSurfaceId;
+              return (
+                <Line
+                  key={`${surface.id}-wall-${index}`}
+                  points={[view.x(point.x), view.y(point.y), view.x(next.x), view.y(next.y)]}
+                  stroke={selected ? '#8A6AAE' : 'transparent'}
+                  strokeWidth={selected ? 18 : 28}
+                  opacity={selected ? 0.22 : 1}
+                  draggable
+                  dragBoundFunc={(pos) => (horizontal ? { x: 0, y: pos.y } : { x: pos.x, y: 0 })}
+                  onClick={(event) => {
+                    event.cancelBubble = true;
+                    if (wallIndex >= 0) onSelectWall(wallIndex);
+                  }}
+                  onTap={(event) => {
+                    event.cancelBubble = true;
+                    if (wallIndex >= 0) onSelectWall(wallIndex);
+                  }}
+                  onDragEnd={(event) => {
+                    event.cancelBubble = true;
+                    handleWallDrag(event, areaId, index, horizontal, view.scale, onMoveWall);
+                  }}
+                />
+              );
+            }) : null}
           </Group>
         );
       })}
@@ -1229,7 +1659,7 @@ function FloorLayer({ dimensionsVisible, onEditSegment, onEditLayoutOffset, onMo
                 x={label.x}
                 y={label.y}
                 text={`${segmentLength(point, next)} мм`}
-                onClick={() => onEditSegment({ type: 'floor-segment', index })}
+                onClick={() => onEditSegment({ type: 'floor-segment', areaId: primaryAreaId, index })}
               />
             ) : null}
             <Line
@@ -1241,7 +1671,7 @@ function FloorLayer({ dimensionsVisible, onEditSegment, onEditLayoutOffset, onMo
               dragBoundFunc={(pos) => (horizontal ? { x: 0, y: pos.y } : { x: pos.x, y: 0 })}
               onClick={() => onSelectWall(index)}
               onTap={() => onSelectWall(index)}
-              onDragEnd={(event) => handleWallDrag(event, index, horizontal, view.scale, onMoveWall)}
+              onDragEnd={(event) => handleWallDrag(event, primaryAreaId, index, horizontal, view.scale, onMoveWall)}
             />
           </Group>
         );
@@ -1260,33 +1690,97 @@ function DimensionLabel({ x, y, text, onClick }: { x: number; y: number; text: s
   );
 }
 
+function FloorOpeningMarkers({
+  areaId,
+  contour,
+  onSelectOpening,
+  project,
+  selectedOpeningId,
+  view,
+}: {
+  areaId: string;
+  contour: PointMm[];
+  onSelectOpening: (surfaceId: string, openingId: string) => void;
+  project: TileProject;
+  selectedOpeningId: string | null;
+  view: PlanViewTransform;
+}) {
+  return (
+    <Group>
+      {contour.flatMap((point, index) => {
+        const next = contour[(index + 1) % contour.length];
+        const surface = project.surfaces.find((item) => item.type === 'wall' && item.sourceRef === `wall:${areaId}:${index + 1}`);
+        if (!surface) return [];
+        const wallLength = Math.max(1, segmentLength(point, next));
+        const vectorX = (next.x - point.x) / wallLength;
+        const vectorY = (next.y - point.y) / wallLength;
+        return surface.openings.map((opening) => {
+          const startOffset = Math.max(0, Math.min(opening.xMm, Math.max(0, wallLength - opening.widthMm)));
+          const endOffset = Math.max(startOffset, Math.min(opening.xMm + opening.widthMm, wallLength));
+          const start = { x: point.x + vectorX * startOffset, y: point.y + vectorY * startOffset };
+          const end = { x: point.x + vectorX * endOffset, y: point.y + vectorY * endOffset };
+          const selected = selectedOpeningId === opening.id;
+          return (
+            <Line
+              key={`floor-opening-${opening.id}`}
+              points={[view.x(start.x), view.y(start.y), view.x(end.x), view.y(end.y)]}
+              stroke={selected ? '#563779' : '#765594'}
+              strokeWidth={selected ? 14 : 10}
+              lineCap="round"
+              opacity={selected ? 0.88 : 0.62}
+              onClick={(event) => {
+                event.cancelBubble = true;
+                onSelectOpening(surface.id, opening.id);
+              }}
+              onTap={(event) => {
+                event.cancelBubble = true;
+                onSelectOpening(surface.id, opening.id);
+              }}
+            />
+          );
+        });
+      })}
+    </Group>
+  );
+}
+
 function WallsLayer({
   dimensionsVisible,
   frames,
+  onDeleteOpening,
   onEditLayoutOffset,
   onEditSegment,
+  onMoveOpening,
+  onResetOpening,
+  onSelectOpening,
   onSelectWall,
   onSelectZone,
   onZoneShapeChange,
   project,
+  selectedOpeningId,
   selectedSurfaceId,
   selectedZoneId,
   selectedWallIndex,
 }: {
   dimensionsVisible: boolean;
   frames: WallFrame[];
+  onDeleteOpening: (openingId: string) => void;
   onEditLayoutOffset: (target: EditTarget) => void;
   onEditSegment: (target: EditTarget) => void;
+  onMoveOpening: (openingId: string, xMm: number) => void;
+  onResetOpening: (openingId: string) => void;
+  onSelectOpening: (surfaceId: string, openingId: string) => void;
   onSelectWall: (index: number | null) => void;
   onSelectZone: (surfaceId: string, zoneId: string | null) => void;
   onZoneShapeChange: (surfaceId: string, zoneId: string, patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   project: TileProject;
+  selectedOpeningId: string | null;
   selectedSurfaceId: string | null;
   selectedZoneId: string | null;
   selectedWallIndex: number | null;
 }) {
   const firstFrame = frames[0];
-  const heightMarkerX = firstFrame ? firstFrame.x - 36 : 0;
+  const heightMarkerX = firstFrame ? firstFrame.x - 90 : 0;
   const titleY = firstFrame ? firstFrame.y - 38 : 372;
 
   return (
@@ -1299,7 +1793,15 @@ function WallsLayer({
         const material = surface?.zones[0]?.materialId ? project.materials.find((item) => item.id === surface.zones[0]?.materialId) : null;
         const layout = surface?.zones[0]?.layout;
         return (
-          <Group key={frame.id} onClick={() => onSelectWall(frame.index)} onTap={() => onSelectWall(frame.index)}>
+          <Group
+            key={frame.id}
+            onClick={(event) => {
+              if (!event.target.findAncestor('.wall-opening')) onSelectWall(frame.index);
+            }}
+            onTap={(event) => {
+              if (!event.target.findAncestor('.wall-opening')) onSelectWall(frame.index);
+            }}
+          >
             <Rect
               x={frame.x}
               y={frame.y}
@@ -1312,10 +1814,15 @@ function WallsLayer({
                 frame={frame}
                 layout={layout}
                 material={material}
+                onDeleteOpening={onDeleteOpening}
                 onEditOffset={(edge) => onEditLayoutOffset({ type: 'layout-offset', edge, surfaceId: frame.id, zoneId: surface.zones[0]!.id })}
+                onMoveOpening={onMoveOpening}
+                onResetOpening={onResetOpening}
+                onSelectOpening={(openingId) => onSelectOpening(frame.id, openingId)}
                 openings={surface.openings}
                 opacity={layoutOpacity}
-                showEdgeCuts={active && !selectedZoneId}
+                selectedOpeningId={selectedOpeningId}
+                showEdgeCuts={active && !selectedZoneId && !selectedOpeningId}
               />
             ) : null}
             {surface?.zones.slice(1).map((zone) => {
@@ -1335,14 +1842,14 @@ function WallsLayer({
                 />
               );
             })}
-            <Rect x={frame.x} y={frame.y} width={frame.width} height={frame.height} stroke={active ? '#8A6AAE' : '#D0D0D8'} strokeWidth={active ? 3 : 1} />
-            <Text x={frame.x} y={frame.y - 52} width={frame.width} align="center" text={frame.name} fill="#6B6B80" fontSize={13} fontStyle="bold" />
+            <Rect x={frame.x} y={frame.y} width={frame.width} height={frame.height} stroke={active ? '#8A6AAE' : '#D0D0D8'} strokeWidth={active ? 3 : 1} listening={false} />
+            <Text x={frame.x} y={frame.y - 52} width={frame.width} align="center" text={frame.name} fill="#6B6B80" fontSize={13} fontStyle="bold" listening={false} />
             {dimensionsVisible ? (
               <DimensionLabel
                 x={frame.x + frame.width / 2}
                 y={frame.y + frame.height + 50}
                 text={`${frame.widthMm} мм`}
-                onClick={() => onEditSegment({ type: 'wall-segment', index: frame.index })}
+                onClick={() => onEditSegment({ type: 'wall-segment', areaId: frame.areaId, index: frame.segmentIndex, surfaceId: frame.id })}
               />
             ) : null}
           </Group>
@@ -1364,17 +1871,27 @@ function WallTileLayout({
   frame,
   layout,
   material,
+  onDeleteOpening,
   onEditOffset,
+  onMoveOpening,
+  onResetOpening,
+  onSelectOpening,
   openings,
   opacity,
+  selectedOpeningId,
   showEdgeCuts,
 }: {
   frame: WallFrame;
   layout: SurfaceLayout;
   material: TileMaterial;
+  onDeleteOpening: (openingId: string) => void;
   onEditOffset: (edge: keyof LayoutEdgeCuts) => void;
+  onMoveOpening: (openingId: string, xMm: number) => void;
+  onResetOpening: (openingId: string) => void;
+  onSelectOpening: (openingId: string) => void;
   openings: Opening[];
   opacity: number;
+  selectedOpeningId: string | null;
   showEdgeCuts: boolean;
 }) {
   const result = generateRectLayout({
@@ -1403,26 +1920,138 @@ function WallTileLayout({
       ))}
       {result.truncated ? <Text x={frame.x + 12} y={frame.y + frame.height - 28} text="Сетка упрощена" fill="#6F4F93" fontSize={13} /> : null}
       </Group>
-      {openings.map((opening) => <WallOpening key={opening.id} frame={frame} opening={opening} />)}
       {showEdgeCuts ? <EdgeCutLabels edgeCuts={result.edgeOffsets} height={frame.height} onEditOffset={onEditOffset} width={frame.width} x={frame.x} y={frame.y} /> : null}
+      {openings.map((opening) => (
+        <WallOpening
+          key={opening.id}
+          frame={frame}
+          opening={opening}
+          onDelete={() => onDeleteOpening(opening.id)}
+          onMove={(xMm) => onMoveOpening(opening.id, xMm)}
+          onReset={() => onResetOpening(opening.id)}
+          onSelect={() => onSelectOpening(opening.id)}
+          selected={selectedOpeningId === opening.id}
+        />
+      ))}
     </Group>
   );
 }
 
-function WallOpening({ frame, opening }: { frame: WallFrame; opening: Opening }) {
+function WallOpening({
+  frame,
+  onDelete,
+  onMove,
+  onReset,
+  onSelect,
+  opening,
+  selected,
+}: {
+  frame: WallFrame;
+  onDelete: () => void;
+  onMove: (xMm: number) => void;
+  onReset: () => void;
+  onSelect: () => void;
+  opening: Opening;
+  selected: boolean;
+}) {
+  const openingWidth = mmToCanvas(opening.widthMm);
+  const openingHeight = mmToCanvas(opening.heightMm);
+  const openingXmm = Math.max(0, Math.min(opening.xMm, Math.max(0, frame.widthMm - opening.widthMm)));
+  const openingY = frame.y + mmToCanvas(opening.yMm);
+  const toolbarX = openingWidth / 2 - 32;
+
   return (
-    <Group>
+    <Group
+      name="wall-opening"
+      x={frame.x + mmToCanvas(openingXmm)}
+      y={openingY}
+      draggable
+      onDragStart={(event) => {
+        event.cancelBubble = true;
+        onSelect();
+      }}
+      onDragMove={(event) => {
+        event.cancelBubble = true;
+        const node = event.currentTarget;
+        node.position({
+          x: Math.max(frame.x, Math.min(node.x(), frame.x + frame.width - openingWidth)),
+          y: openingY,
+        });
+      }}
+      onDragEnd={(event) => {
+        event.cancelBubble = true;
+        const node = event.currentTarget;
+        const x = Math.max(frame.x, Math.min(node.x(), frame.x + frame.width - openingWidth));
+        node.position({ x, y: openingY });
+        onMove(canvasToMm(x - frame.x));
+      }}
+      onMouseDown={(event) => {
+        event.cancelBubble = true;
+        onSelect();
+      }}
+      onTouchStart={(event) => {
+        event.cancelBubble = true;
+        onSelect();
+      }}
+      onClick={(event) => {
+        event.cancelBubble = true;
+        onSelect();
+      }}
+      onTap={(event) => {
+        event.cancelBubble = true;
+        onSelect();
+      }}
+      onMouseEnter={(event) => {
+        const stage = event.target.getStage();
+        if (stage) stage.container().style.cursor = 'ew-resize';
+      }}
+      onMouseLeave={(event) => {
+        const stage = event.target.getStage();
+        if (stage) stage.container().style.cursor = 'default';
+      }}
+    >
       <Rect
-        x={frame.x + mmToCanvas(opening.xMm)}
-        y={frame.y + mmToCanvas(opening.yMm)}
-        width={mmToCanvas(opening.widthMm)}
-        height={mmToCanvas(opening.heightMm)}
-        fill="#FFFFFF"
-        stroke="#A385C4"
-        strokeWidth={1.5}
+        width={openingWidth}
+        height={openingHeight}
+        fill={selected ? '#EEE2F8' : '#FFFFFF'}
+        stroke={selected ? '#6F4F93' : '#A385C4'}
+        strokeWidth={selected ? 3 : 1.5}
         dash={[8, 6]}
       />
-      <Text x={frame.x + mmToCanvas(opening.xMm)} y={frame.y + mmToCanvas(opening.yMm) + 8} width={mmToCanvas(opening.widthMm)} align="center" text={opening.name} fill="#6F4F93" fontSize={12} />
+      <Text y={8} width={openingWidth} align="center" text={opening.name} fill="#6F4F93" fontSize={12} listening={false} />
+      {selected ? (
+        <Group x={toolbarX} y={-38}>
+          <Group
+            onClick={(event) => {
+              event.cancelBubble = true;
+              onReset();
+            }}
+            onTap={(event) => {
+              event.cancelBubble = true;
+              onReset();
+            }}
+          >
+            <Rect width={28} height={28} fill="#FFFFFF" stroke="#CDB9DF" strokeWidth={1} cornerRadius={6} shadowColor="rgba(38, 24, 50, 0.16)" shadowBlur={6} />
+            <Text x={2} y={2} width={24} height={24} align="center" verticalAlign="middle" text="↺" fill="#6F4F93" fontSize={20} />
+          </Group>
+          <Group
+            x={36}
+            onClick={(event) => {
+              event.cancelBubble = true;
+              onDelete();
+            }}
+            onTap={(event) => {
+              event.cancelBubble = true;
+              onDelete();
+            }}
+          >
+            <Rect width={28} height={28} fill="#FFFFFF" stroke="#E1B7C0" strokeWidth={1} cornerRadius={6} shadowColor="rgba(38, 24, 50, 0.16)" shadowBlur={6} />
+            <Line points={[9, 9, 19, 9]} stroke="#A83F57" strokeWidth={1.7} lineCap="round" />
+            <Line points={[11, 7, 17, 7]} stroke="#A83F57" strokeWidth={1.7} lineCap="round" />
+            <Rect x={10} y={11} width={8} height={10} stroke="#A83F57" strokeWidth={1.5} cornerRadius={1} />
+          </Group>
+        </Group>
+      ) : null}
     </Group>
   );
 }
@@ -1486,7 +2115,7 @@ function WallZoneLayer({
             y={y + mmToCanvas(piece.yMm)}
             width={Math.max(1, mmToCanvas(piece.widthMm))}
             height={Math.max(1, mmToCanvas(piece.heightMm))}
-            fill={getLayoutPieceFill(piece.kind)}
+            fill={getFloorLayoutPieceFill(piece.kind)}
             stroke={getLayoutPieceStroke(piece.kind)}
             strokeWidth={0.7}
           />
@@ -1504,22 +2133,35 @@ type SurfaceLayout = TileProject['surfaces'][number]['zones'][number]['layout'];
 
 function FloorTileLayout({ contour, layout, material, opacity, view }: { contour: PointMm[]; layout: SurfaceLayout; material: TileMaterial; opacity: number; view: PlanViewTransform }) {
   const box = getBoundingBox(contour);
-  const result = generatePolygonLayout({
+  // Render whole tiles and clip the finished layout by the room contour. The
+  // polygon layout engine may split one tile into several calculation pieces
+  // for concave rooms; outlining those pieces exposes artificial inner seams.
+  const result = generateRectLayout({
+    heightMm: box.height,
     layout,
-    points: contour,
     tileHeightMm: material.heightMm,
     tileWidthMm: material.widthMm,
+    widthMm: box.width,
   });
 
   return (
-    <Group opacity={opacity}>
+    <Group
+      opacity={opacity}
+      clipFunc={(context) => {
+        if (!contour.length) return;
+        context.beginPath();
+        context.moveTo(view.x(contour[0].x), view.y(contour[0].y));
+        for (const point of contour.slice(1)) context.lineTo(view.x(point.x), view.y(point.y));
+        context.closePath();
+      }}
+    >
       {result.pieces.map((piece) =>
         piece.polygon ? (
           <Line
             key={piece.id}
             points={piece.polygon.flatMap((point) => [view.x(point.x + box.minX), view.y(point.y + box.minY)])}
             closed
-            fill={getLayoutPieceFill(piece.kind)}
+            fill={getFloorLayoutPieceFill(piece.kind)}
             stroke={getLayoutPieceStroke(piece.kind)}
             strokeWidth={0.7}
           />
@@ -1530,7 +2172,7 @@ function FloorTileLayout({ contour, layout, material, opacity, view }: { contour
             y={view.y(piece.yMm + box.minY)}
             width={Math.max(1, mmToCanvas(piece.widthMm))}
             height={Math.max(1, mmToCanvas(piece.heightMm))}
-            fill={getLayoutPieceFill(piece.kind)}
+            fill={getFloorLayoutPieceFill(piece.kind)}
             stroke={getLayoutPieceStroke(piece.kind)}
             strokeWidth={0.7}
           />
@@ -1687,12 +2329,16 @@ function FloorEdgeCutLabels({ contour, layout, material, onEditOffset, view }: {
 }
 
 function EdgeCutLabels({ edgeCuts, height, onEditOffset, width, x, y }: { edgeCuts: LayoutEdgeCuts; height: number; onEditOffset: (edge: keyof LayoutEdgeCuts) => void; width: number; x: number; y: number }) {
+  const top = edgeCuts.top ?? 0;
+  const bottom = edgeCuts.bottom ?? 0;
+  const left = edgeCuts.left ?? 0;
+  const right = edgeCuts.right ?? 0;
   return (
     <Group>
-      <SmallMetricLabel x={x + width / 2} y={y - 20} text={`${edgeCuts.top ?? 0} мм`} onClick={() => onEditOffset('top')} />
-      <SmallMetricLabel x={x + width / 2} y={y + height + 20} text={`${edgeCuts.bottom ?? 0} мм`} onClick={() => onEditOffset('bottom')} />
-      <SmallMetricLabel x={x - 42} y={y + height / 2} text={`${edgeCuts.left ?? 0} мм`} onClick={() => onEditOffset('left')} />
-      <SmallMetricLabel x={x + width + 42} y={y + height / 2} text={`${edgeCuts.right ?? 0} мм`} onClick={() => onEditOffset('right')} />
+      {top > 0 ? <SmallMetricLabel x={x + width / 2} y={y - 20} text={`${top} мм`} onClick={() => onEditOffset('top')} /> : null}
+      {bottom > 0 ? <SmallMetricLabel x={x + width / 2} y={y + height + 20} text={`${bottom} мм`} onClick={() => onEditOffset('bottom')} /> : null}
+      {left > 0 ? <SmallMetricLabel x={x - 42} y={y + height / 2} text={`${left} мм`} onClick={() => onEditOffset('left')} /> : null}
+      {right > 0 ? <SmallMetricLabel x={x + width + 42} y={y + height / 2} text={`${right} мм`} onClick={() => onEditOffset('right')} /> : null}
     </Group>
   );
 }
@@ -1710,6 +2356,12 @@ function getLayoutPieceFill(kind: 'full' | 'cut' | 'critical') {
   if (kind === 'critical') return 'rgba(111, 79, 147, 0.34)';
   if (kind === 'cut') return 'rgba(163, 133, 196, 0.24)';
   return 'rgba(255, 255, 255, 0.72)';
+}
+
+function getFloorLayoutPieceFill(kind: 'full' | 'cut' | 'critical') {
+  if (kind === 'critical') return '#CEC0DC';
+  if (kind === 'cut') return '#E9E0F0';
+  return '#FFFFFF';
 }
 
 function getLayoutPieceStroke(kind: 'full' | 'cut' | 'critical') {
@@ -1823,9 +2475,8 @@ function LayoutControl({
   layout,
   layoutDragEnabled,
   material,
-  tileFormatsOpen,
-  onLayoutOptionsOpen,
-  onCloseTileFormats,
+  openSection,
+  onOpenSectionChange,
   onOriginModeChange,
   onOffsetInput,
   onOffsetReset,
@@ -1838,9 +2489,8 @@ function LayoutControl({
   layout: SurfaceLayout | undefined;
   layoutDragEnabled: boolean;
   material: TileMaterial | null | undefined;
-  tileFormatsOpen: boolean;
-  onLayoutOptionsOpen: () => void;
-  onCloseTileFormats: () => void;
+  openSection: TilePanelSection | null;
+  onOpenSectionChange: (section: TilePanelSection | null) => void;
   onOriginModeChange: (originMode: SurfaceLayout['originMode']) => void;
   onOffsetInput: (axis: 'x' | 'y', value: string) => void;
   onOffsetReset: () => void;
@@ -1850,12 +2500,9 @@ function LayoutControl({
   surface: TileProject['surfaces'][number] | null | undefined;
   zone: FinishZone | null | undefined;
 }) {
-  const [optionsOpen, setOptionsOpen] = useState(false);
-  const [optionsPage, setOptionsPage] = useState<0 | 1>(0);
-
-  useEffect(() => {
-    if (tileFormatsOpen) setOptionsOpen(false);
-  }, [tileFormatsOpen]);
+  const handleSectionToggle = (section: TilePanelSection, open: boolean) => {
+    onOpenSectionChange(open ? section : openSection === section ? null : openSection);
+  };
   const modes: Array<{ label: string; title: string; value: SurfaceLayout['originMode'] }> = [
     { label: '↖', title: 'Левый верх', value: 'corner-tl' },
     { label: '↑', title: 'Сверху', value: 'corner-t' },
@@ -1881,116 +2528,85 @@ function LayoutControl({
   return (
     <>
       <section className="panel-module layout-module">
-        <h1 className="panel-module-title">Раскладка</h1>
+        <h1 className="panel-module-title">Укладка</h1>
         <details
           className="panel-card panel-section layout-options-select"
-          open={optionsOpen}
-          onToggle={(event) => {
-            const open = event.currentTarget.open;
-            setOptionsOpen(open);
-            if (open) onLayoutOptionsOpen();
-          }}
+          open={openSection === 'laying'}
+          onToggle={(event) => handleSectionToggle('laying', event.currentTarget.open)}
         >
           <summary className="layout-options-summary">
-            <strong>{optionsPage === 0 ? 'Точка старта' : 'Центрирование и схема'}</strong>
+            <strong>Центрирование и схема</strong>
           </summary>
-          <div className="layout-pages-viewport">
-            <div className="layout-pages" style={{ transform: `translateX(-${optionsPage * 50}%)` }}>
-              <div className="layout-page">
-                <div className="origin-mode-grid">
-                  {modes.map((mode) => (
-                    <button
-                      key={mode.value}
-                      type="button"
-                      title={mode.title}
-                      aria-label={mode.title}
-                      className={zone?.layout.originMode === mode.value ? 'active' : ''}
-                      disabled={!zone}
-                      onClick={() => onOriginModeChange(mode.value)}
-                    >
-                      {mode.label}
-                    </button>
-                  ))}
-                </div>
-                <button type="button" className="layout-page-arrow next" aria-label="Показать центрирование и схемы укладки" onClick={() => setOptionsPage(1)}>→</button>
+          <div className="layout-page single-page">
+            <div className="layout-secondary-grid">
+              <button type="button" className={zone?.layout.originMode === 'tile-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('tile-center')}>Плитка в центре</button>
+              <button type="button" className={zone?.layout.originMode === 'joint-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('joint-center')}>Шов в центре</button>
+              {patterns.map((pattern) => (
+                <button key={pattern.value} type="button" className={zone?.layout.pattern === pattern.value ? 'active' : ''} disabled={!zone} onClick={() => onPatternChange(pattern.value)}>{pattern.label}</button>
+              ))}
+              <button
+                type="button"
+                disabled={!zone}
+                onClick={() => {
+                  onOriginModeChange('corner-tl');
+                  onPatternChange('straight');
+                  onOffsetReset();
+                  onToggleLayoutDrag(false);
+                }}
+              >
+                Сбросить
+              </button>
+            </div>
+            <LayoutMetrics material={material} surface={surface} zone={zone} />
+          </div>
+        </details>
+      </section>
+      <section className="panel-module origin-module">
+        <h1 className="panel-module-title">Точка старта</h1>
+        <details
+          className="panel-card panel-section layout-options-select origin-options-select"
+          open={openSection === 'origin'}
+          onToggle={(event) => handleSectionToggle('origin', event.currentTarget.open)}
+        >
+          <summary className="layout-options-summary"><strong>Выберите точку старта</strong></summary>
+          <div className="origin-options-content">
+            <div className="origin-mode-grid">
+              {modes.map((mode) => (
+                <button key={mode.value} type="button" title={mode.title} aria-label={mode.title} className={zone?.layout.originMode === mode.value ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange(mode.value)}>{mode.label}</button>
+              ))}
+            </div>
+          </div>
+        </details>
+      </section>
+      <section className="panel-module movement-module">
+        <h1 className="panel-module-title">Движение</h1>
+        <details
+          className="panel-card panel-section layout-options-select movement-options-select"
+          open={openSection === 'movement'}
+          onToggle={(event) => handleSectionToggle('movement', event.currentTarget.open)}
+        >
+          <summary className="layout-options-summary"><strong>Перемещение плитки</strong></summary>
+          <div className="movement-options-content">
+            <div className="layout-control layout-move-card">
+              <button type="button" className={layoutDragEnabled ? 'layout-drag-button active' : 'layout-drag-button'} disabled={!zone} aria-pressed={layoutDragEnabled} onClick={() => onToggleLayoutDrag(!layoutDragEnabled)}>Двигать мышью</button>
+              <div className="layout-offset-control">
+                <button type="button" aria-label="Сдвинуть влево вверх" disabled={!zone} onClick={() => onOffsetStep(-10, -10)}>↖</button>
+                <button type="button" aria-label="Сдвинуть вверх" disabled={!zone} onClick={() => onOffsetStep(0, -10)}><ArrowUp size={15} /></button>
+                <button type="button" aria-label="Сдвинуть вправо вверх" disabled={!zone} onClick={() => onOffsetStep(10, -10)}>↗</button>
+                <button type="button" aria-label="Сдвинуть влево" disabled={!zone} onClick={() => onOffsetStep(-10, 0)}><ArrowLeft size={15} /></button>
+                <button type="button" aria-label="Сбросить смещение" disabled={!zone} onClick={onOffsetReset}><RotateCcw size={15} /></button>
+                <button type="button" aria-label="Сдвинуть вправо" disabled={!zone} onClick={() => onOffsetStep(10, 0)}><ArrowRight size={15} /></button>
+                <button type="button" aria-label="Сдвинуть влево вниз" disabled={!zone} onClick={() => onOffsetStep(-10, 10)}>↙</button>
+                <button type="button" aria-label="Сдвинуть вниз" disabled={!zone} onClick={() => onOffsetStep(0, 10)}><ArrowDown size={15} /></button>
+                <button type="button" aria-label="Сдвинуть вправо вниз" disabled={!zone} onClick={() => onOffsetStep(10, 10)}>↘</button>
               </div>
-              <div className="layout-page">
-                <div className="layout-secondary-grid">
-                  <button type="button" className={zone?.layout.originMode === 'tile-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('tile-center')}>Плитка в центре</button>
-                  <button type="button" className={zone?.layout.originMode === 'joint-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('joint-center')}>Шов в центре</button>
-                  {patterns.map((pattern) => (
-                    <button key={pattern.value} type="button" className={zone?.layout.pattern === pattern.value ? 'active' : ''} disabled={!zone} onClick={() => onPatternChange(pattern.value)}>{pattern.label}</button>
-                  ))}
-                  <button
-                    type="button"
-                    disabled={!zone}
-                    onClick={() => {
-                      onOriginModeChange('corner-tl');
-                      onPatternChange('straight');
-                      onOffsetReset();
-                      onToggleLayoutDrag(false);
-                    }}
-                  >
-                    Сбросить
-                  </button>
-                </div>
-                <button type="button" className="layout-page-arrow previous" aria-label="Вернуться к точкам старта" onClick={() => setOptionsPage(0)}>←</button>
+              <div className="layout-offset-fields">
+                <label>X<input type="number" step={10} value={offsetX} disabled={!zone} onChange={(event) => onOffsetInput('x', event.currentTarget.value)} /></label>
+                <label>Y<input type="number" step={10} value={offsetY} disabled={!zone} onChange={(event) => onOffsetInput('y', event.currentTarget.value)} /></label>
               </div>
             </div>
           </div>
         </details>
-        <LayoutMetrics material={material} surface={surface} zone={zone} />
-      </section>
-      <section className="panel-module layout-move-module">
-        <div className="layout-move-heading">
-          <h1 className="panel-module-title">Двигать</h1>
-          {tileFormatsOpen || optionsOpen ? (
-            <button
-              type="button"
-              onClick={() => {
-                onCloseTileFormats();
-                setOptionsOpen(false);
-              }}
-            >
-              Ручное передвижение
-            </button>
-          ) : null}
-        </div>
-        <div
-          className={tileFormatsOpen || optionsOpen ? 'panel-card panel-section layout-control layout-move-card collapsed' : 'panel-card panel-section layout-control layout-move-card'}
-          aria-hidden={tileFormatsOpen || optionsOpen}
-        >
-          <button
-            type="button"
-            className={layoutDragEnabled ? 'layout-drag-button active' : 'layout-drag-button'}
-            disabled={!zone}
-            aria-pressed={layoutDragEnabled}
-            onClick={() => onToggleLayoutDrag(!layoutDragEnabled)}
-          >
-            Двигать мышью
-          </button>
-          <div className="layout-offset-control">
-            <button type="button" aria-label="Сдвинуть влево вверх" disabled={!zone} onClick={() => onOffsetStep(-10, -10)}>↖</button>
-            <button type="button" aria-label="Сдвинуть вверх" disabled={!zone} onClick={() => onOffsetStep(0, -10)}><ArrowUp size={15} /></button>
-            <button type="button" aria-label="Сдвинуть вправо вверх" disabled={!zone} onClick={() => onOffsetStep(10, -10)}>↗</button>
-            <button type="button" aria-label="Сдвинуть влево" disabled={!zone} onClick={() => onOffsetStep(-10, 0)}><ArrowLeft size={15} /></button>
-            <button type="button" aria-label="Сбросить смещение" disabled={!zone} onClick={onOffsetReset}><RotateCcw size={15} /></button>
-            <button type="button" aria-label="Сдвинуть вправо" disabled={!zone} onClick={() => onOffsetStep(10, 0)}><ArrowRight size={15} /></button>
-            <button type="button" aria-label="Сдвинуть влево вниз" disabled={!zone} onClick={() => onOffsetStep(-10, 10)}>↙</button>
-            <button type="button" aria-label="Сдвинуть вниз" disabled={!zone} onClick={() => onOffsetStep(0, 10)}><ArrowDown size={15} /></button>
-            <button type="button" aria-label="Сдвинуть вправо вниз" disabled={!zone} onClick={() => onOffsetStep(10, 10)}>↘</button>
-          </div>
-          <div className="layout-offset-fields">
-            <label>
-              X
-              <input type="number" step={10} value={offsetX} disabled={!zone} onChange={(event) => onOffsetInput('x', event.currentTarget.value)} />
-            </label>
-            <label>
-              Y
-              <input type="number" step={10} value={offsetY} disabled={!zone} onChange={(event) => onOffsetInput('y', event.currentTarget.value)} />
-            </label>
-          </div>
-        </div>
       </section>
       <PromoCard />
     </>
@@ -2163,11 +2779,13 @@ interface PlanViewTransform {
 }
 
 interface WallFrame {
+  areaId: string;
   height: number;
   heightMm: number;
   id: string;
   index: number;
   name: string;
+  segmentIndex: number;
   width: number;
   widthMm: number;
   x: number;
@@ -2210,25 +2828,34 @@ function getPlanView(contour: PointMm[]): PlanViewTransform {
 
 function getWallFrames(project: TileProject, view: PlanViewTransform): WallFrame[] {
   const walls = project.surfaces.filter((surface) => surface.type === 'wall');
-  const startX = 170;
-  const floorBottomY = Math.max(...project.room.contour.map((point) => view.y(point.y)));
+  const startX = 220;
+  const floorBottomY = Math.max(...(project.room.areas ?? [{ contour: project.room.contour }]).flatMap((area) => area.contour.map((point) => view.y(point.y))));
   const startY = calculateWallsStartY(floorBottomY);
   const gap = 96;
-  let x = startX;
+  const areaIds = (project.room.areas ?? []).map((area) => area.id);
+  const rowHeight = mmToCanvas(project.room.heightMm) + 170;
+  const rowX = new Map<number, number>();
 
   return walls.map((wall, index) => {
+    const sourceParts = wall.sourceRef?.split(':') ?? [];
+    const areaRow = sourceParts[0] === 'wall' ? Math.max(0, areaIds.indexOf(sourceParts[1])) : areaIds.length;
+    const areaId = sourceParts[0] === 'wall' ? sourceParts[1] : areaIds[0] ?? 'room-1';
+    const segmentIndex = sourceParts[0] === 'wall' ? Math.max(0, Number(sourceParts[2]) - 1) : index;
+    const x = rowX.get(areaRow) ?? startX;
     const frame = {
+      areaId,
       height: mmToCanvas(wall.heightMm),
       heightMm: wall.heightMm,
       id: wall.id,
       index,
       name: wall.name,
+      segmentIndex,
       width: mmToCanvas(wall.widthMm),
       widthMm: wall.widthMm,
       x,
-      y: startY,
+      y: startY + areaRow * rowHeight,
     };
-    x += frame.width + gap;
+    rowX.set(areaRow, x + frame.width + gap);
     return frame;
   });
 }
@@ -2242,7 +2869,7 @@ function getInlineEdit(
 ): InlineEdit {
   if (target.type === 'wall-height') {
     const firstFrame = frames[0];
-    const markerX = firstFrame ? firstFrame.x - 90 : 80;
+    const markerX = firstFrame ? firstFrame.x - 144 : 80;
     const markerY = firstFrame ? firstFrame.y + firstFrame.height / 2 : 520;
     return {
       left: Math.round(viewport.x + markerX * viewport.zoom),
@@ -2267,12 +2894,12 @@ function getInlineEdit(
   }
 
   const { index } = target;
-  const contour = project.room.contour;
+  const contour = project.room.areas?.find((area) => area.id === target.areaId)?.contour ?? project.room.contour;
   const current = contour[index];
   const next = contour[(index + 1) % contour.length];
   const canvasScale = viewport.zoom;
   if (target.type === 'wall-segment') {
-    const frame = frames[index];
+    const frame = frames.find((item) => item.id === target.surfaceId) ?? frames[index];
     return {
       left: Math.round(viewport.x + (frame.x + frame.width / 2) * canvasScale),
       max: 15000,
@@ -2366,12 +2993,12 @@ function getSurfaceRectOnCanvas(surface: TileProject['surfaces'][number], zone: 
   return { height: mmToCanvas(box.height), width: mmToCanvas(box.width), x: view.x(box.minX), y: view.y(box.minY) };
 }
 
-function handleWallDrag(event: Konva.KonvaEventObject<DragEvent>, index: number, horizontal: boolean, scale: number, onMoveWall: (index: number, deltaMm: number) => void) {
-  const node = event.target;
+function handleWallDrag(event: Konva.KonvaEventObject<DragEvent>, areaId: string, index: number, horizontal: boolean, scale: number, onMoveWall: (areaId: string, index: number, deltaMm: number) => void) {
+  const node = event.currentTarget;
   const deltaPx = horizontal ? node.y() : node.x();
   node.position({ x: 0, y: 0 });
   const deltaMm = Math.round(deltaPx / scale);
-  if (Math.abs(deltaMm) >= 10) onMoveWall(index, deltaMm);
+  if (Math.abs(deltaMm) >= 10) onMoveWall(areaId, index, deltaMm);
 }
 
 function getPreferredTemplateSize(template: RoomTemplate): [number, number] | undefined {

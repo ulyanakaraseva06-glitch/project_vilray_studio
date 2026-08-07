@@ -109,6 +109,7 @@ export function generateRectLayout(input: RectLayoutInput): RectLayoutResult {
 
 export function generatePolygonLayout(input: PolygonLayoutInput): RectLayoutResult {
   const box = getBoundingBox(input.points);
+  const normalizedPolygon = input.points.map((point) => ({ x: point.x - box.minX, y: point.y - box.minY }));
   const cells = decomposeOrthogonalPolygon(input.points, box);
   const rectResult = generateRectLayout({
     heightMm: box.height,
@@ -119,6 +120,24 @@ export function generatePolygonLayout(input: PolygonLayoutInput): RectLayoutResu
     widthMm: box.width,
   });
   const pieces: LayoutTilePiece[] = [];
+
+  if (isConvexPolygon(normalizedPolygon)) {
+    for (const piece of rectResult.pieces) {
+      const clippedPolygon = clipPolygonByConvexPolygon(rectToPolygon(piece), normalizedPolygon);
+      if (clippedPolygon.length < 3 || polygonArea(clippedPolygon) <= EPSILON_MM) continue;
+      const clippedBox = getBoundingBox(clippedPolygon);
+      pieces.push({
+        ...piece,
+        heightMm: clippedBox.height,
+        kind: classifyPiece(clippedBox.width, clippedBox.height, piece.widthMm, piece.heightMm, input.layout.criticalCutMm),
+        polygon: clippedPolygon,
+        widthMm: clippedBox.width,
+        xMm: clippedBox.minX,
+        yMm: clippedBox.minY,
+      });
+    }
+    return summarizePieces(pieces, rectResult.truncated);
+  }
 
   for (const piece of rectResult.pieces) {
     for (const cell of cells) {
@@ -141,6 +160,74 @@ export function generatePolygonLayout(input: PolygonLayoutInput): RectLayoutResu
   }
 
   return summarizePieces(pieces, rectResult.truncated);
+}
+
+function isConvexPolygon(points: PointMm[]): boolean {
+  if (points.length < 3) return false;
+  let direction = 0;
+  for (let index = 0; index < points.length; index += 1) {
+    const a = points[index];
+    const b = points[(index + 1) % points.length];
+    const c = points[(index + 2) % points.length];
+    const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (Math.abs(cross) <= EPSILON_MM) continue;
+    const nextDirection = Math.sign(cross);
+    if (direction && nextDirection !== direction) return false;
+    direction = nextDirection;
+  }
+  return direction !== 0;
+}
+
+function clipPolygonByConvexPolygon(subject: PointMm[], clip: PointMm[]): PointMm[] {
+  let output = subject;
+  const orientation = Math.sign(signedPolygonArea(clip)) || 1;
+  for (let index = 0; index < clip.length; index += 1) {
+    const edgeStart = clip[index];
+    const edgeEnd = clip[(index + 1) % clip.length];
+    const input = output;
+    output = [];
+    if (!input.length) break;
+    let previous = input[input.length - 1];
+    for (const current of input) {
+      const currentInside = isInsideClipEdge(current, edgeStart, edgeEnd, orientation);
+      const previousInside = isInsideClipEdge(previous, edgeStart, edgeEnd, orientation);
+      if (currentInside) {
+        if (!previousInside) output.push(lineIntersection(previous, current, edgeStart, edgeEnd));
+        output.push(current);
+      } else if (previousInside) {
+        output.push(lineIntersection(previous, current, edgeStart, edgeEnd));
+      }
+      previous = current;
+    }
+  }
+  return output;
+}
+
+function isInsideClipEdge(point: PointMm, edgeStart: PointMm, edgeEnd: PointMm, orientation: number): boolean {
+  const cross = (edgeEnd.x - edgeStart.x) * (point.y - edgeStart.y) - (edgeEnd.y - edgeStart.y) * (point.x - edgeStart.x);
+  return orientation * cross >= -EPSILON_MM;
+}
+
+function lineIntersection(start: PointMm, end: PointMm, edgeStart: PointMm, edgeEnd: PointMm): PointMm {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const edgeDx = edgeEnd.x - edgeStart.x;
+  const edgeDy = edgeEnd.y - edgeStart.y;
+  const denominator = dx * edgeDy - dy * edgeDx;
+  if (Math.abs(denominator) <= EPSILON_MM) return end;
+  const t = ((edgeStart.x - start.x) * edgeDy - (edgeStart.y - start.y) * edgeDx) / denominator;
+  return { x: start.x + t * dx, y: start.y + t * dy };
+}
+
+function signedPolygonArea(points: PointMm[]): number {
+  return points.reduce((sum, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return sum + point.x * next.y - next.x * point.y;
+  }, 0) / 2;
+}
+
+function polygonArea(points: PointMm[]): number {
+  return Math.abs(signedPolygonArea(points));
 }
 
 export function getResolvedOrigin(layout: LayoutSettings, surfaceWidthMm: number, surfaceHeightMm: number, tileWidthMm: number, tileHeightMm: number) {

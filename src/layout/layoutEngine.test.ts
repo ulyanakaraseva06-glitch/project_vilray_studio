@@ -97,6 +97,18 @@ describe('layout engine', () => {
     expect(result.pieces.every((piece) => piece.polygon && piece.polygon.length >= 4)).toBe(true);
   });
 
+  it('clips every tile vertex by a diagonal floor edge', () => {
+    const result = generatePolygonLayout({
+      layout: { ...layout, groutMm: 0 },
+      points: [{ x: 0, y: 0 }, { x: 1000, y: 0 }, { x: 0, y: 1000 }],
+      tileHeightMm: 500,
+      tileWidthMm: 500,
+    });
+
+    expect(result.pieces.length).toBeGreaterThan(0);
+    expect(result.pieces.every((piece) => piece.polygon?.every((point) => point.x >= -0.5 && point.y >= -0.5 && point.x + point.y <= 1000.5))).toBe(true);
+  });
+
   it('calculates edge cuts and minimum cut size', () => {
     const result = generateRectLayout({
       heightMm: 600,

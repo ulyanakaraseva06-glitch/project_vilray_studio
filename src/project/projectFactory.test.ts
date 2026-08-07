@@ -2,18 +2,25 @@ import { describe, expect, it } from 'vitest';
 import { templates } from '../config/appConfig';
 import {
   addAdjacentRoom,
+  addRoomFromTemplate,
   addFloorZone,
   addOpening,
   addPartition,
   addWallZone,
   createProjectFromTemplate,
+  deleteOpening,
   deleteZone,
   ensureProjectDefaults,
   getSurfaceMaterial,
   getZoneMaterial,
+  moveRoomArea,
+  moveRoomAreaWall,
+  moveOpening,
+  resetOpening,
   updatePrimaryCustomTileMaterial,
   updatePrimaryTileMaterial,
   updateRoomHeight,
+  updateRoomAreaSegmentLength,
   updateSurfaceLayoutOffset,
   updateSurfaceLayoutOrigin,
   updateSurfaceTileMaterial,
@@ -202,6 +209,31 @@ describe('project factory', () => {
     expect(updated.room.openings?.some((opening) => opening.kind === 'passage')).toBe(true);
   });
 
+  it('adds a chosen room to the right and moves it without allowing overlap', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const added = addRoomFromTemplate(project, templates[1], templates[1].sizes[0]);
+    const firstBox = added.room.areas![0].contour;
+    const secondBefore = added.room.areas![1].contour;
+    const moved = moveRoomArea(added, 'room-2', -400, 0);
+    expect(Math.min(...moved.room.areas![1].contour.map((point) => point.x))).toBe(Math.max(...firstBox.map((point) => point.x)));
+    const rejected = moveRoomArea(moved, 'room-2', -100, 0);
+    expect(rejected.room.areas![1].contour).toEqual(moved.room.areas![1].contour);
+    expect(secondBefore).not.toEqual(moved.room.areas![1].contour);
+  });
+
+  it('edits walls of the second room without changing the first room', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const added = addRoomFromTemplate(project, templates[0], [1600, 1900]);
+    const firstContour = added.room.areas![0].contour;
+    const resized = updateRoomAreaSegmentLength(added, 'room-2', 0, 2100);
+    const dragged = moveRoomAreaWall(resized, 'room-2', 1, 100);
+
+    expect(resized.room.areas![0].contour).toEqual(firstContour);
+    expect(resized.surfaces.find((surface) => surface.id === 'surface-wall-room-2-1')?.widthMm).toBe(2100);
+    expect(dragged.room.areas![0].contour).toEqual(firstContour);
+    expect(dragged.room.areas![1].contour).not.toEqual(resized.room.areas![1].contour);
+  });
+
   it('adds doors and partitions as project geometry', () => {
     const project = createProjectFromTemplate(templates[0], [1700, 2000]);
     const withDoor = addOpening(project, 'surface-wall-1', 'door');
@@ -211,6 +243,20 @@ describe('project factory', () => {
     expect(withPartition.room.partitions).toHaveLength(1);
     expect(withPartition.surfaces.some((surface) => surface.id === 'surface-partition-1-a')).toBe(true);
     expect(withPartition.surfaces.some((surface) => surface.id === 'surface-partition-1-b')).toBe(true);
+  });
+
+  it('moves, resets and deletes an opening on its selected wall', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const withDoor = addOpening(project, 'surface-wall-1', 'door');
+    const door = withDoor.room.openings![0];
+    const moved = moveOpening(withDoor, door.id, 50);
+    const reset = resetOpening(moved, door.id);
+    const deleted = deleteOpening(reset, door.id);
+
+    expect(moved.room.openings![0].xMm).toBe(50);
+    expect(reset.room.openings![0].xMm).toBe(door.initialXmm);
+    expect(deleted.room.openings).toHaveLength(0);
+    expect(deleted.surfaces.find((surface) => surface.id === 'surface-wall-1')?.openings).toHaveLength(0);
   });
 
   it('preserves material assignments when a second room is added', () => {

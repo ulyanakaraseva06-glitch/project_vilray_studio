@@ -186,6 +186,11 @@ input {
   background: var(--bg-white);
 }
 
+.drawing-line-active .konva-stage,
+.drawing-line-active .konva-stage canvas {
+  cursor: none !important;
+}
+
 .canvas-layer-controls,
 .canvas-toolbar,
 .drawing-controls,
@@ -239,12 +244,16 @@ input {
 .drawing-controls {
   left: 12px;
   bottom: 12px;
-  max-width: min(540px, calc(100% - 24px));
+  max-width: calc(100% - 24px);
+  gap: 8px;
+  padding: 10px;
 }
 
 .drawing-controls strong {
   color: var(--text);
   font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .drawing-controls span {
@@ -261,18 +270,45 @@ input {
 }
 
 .drawing-controls button {
-  min-height: 32px;
-  padding: 0 9px;
+  min-height: 34px;
+  padding: 0 11px;
   color: var(--text);
   background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
 }
 
-.drawing-controls button:first-of-type {
+.drawing-controls > .drawing-complete {
   color: var(--bg-white);
   background: var(--primary);
+  border-color: var(--primary);
+}
+
+.drawing-mode-options {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.drawing-controls .drawing-mode-options button {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.drawing-controls .drawing-mode-options button.active {
+  color: var(--primary-dark);
+  background: var(--primary-light);
   border-color: var(--primary);
 }
 
@@ -341,6 +377,8 @@ input {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
 }
 
 .panel-tabs button.active {
@@ -391,11 +429,12 @@ input {
 
 .tile-format-select::details-content,
 .layout-options-select::details-content {
+  interpolate-size: allow-keywords;
   height: 0;
   overflow: hidden;
   opacity: 0;
   transform: translateY(-6px);
-  transition: height 240ms ease, opacity 180ms ease, transform 240ms ease, content-visibility 240ms allow-discrete;
+  transition: height 280ms ease, opacity 220ms ease, transform 280ms ease, content-visibility 280ms allow-discrete;
 }
 
 .tile-format-select[open]::details-content,
@@ -660,6 +699,26 @@ input {
   flex: 0 0 50%;
   gap: 7px;
   padding: 8px;
+}
+
+.layout-page.single-page {
+  width: 100%;
+  padding: 8px;
+}
+
+.alignment-options-content,
+.origin-options-content,
+.movement-options-content {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.alignment-options-content .layout-move-card,
+.movement-options-content .layout-move-card {
+  padding: 0;
+  border: 0;
 }
 
 .layout-secondary-grid {
@@ -1144,10 +1203,11 @@ input {
 }
 
 .promo-card {
-  display: flex;
+  display: grid;
   min-height: 132px;
   flex: 1 1 auto;
-  flex-direction: column;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   padding: 12px;
   background: linear-gradient(180deg, #FFFFFF 0%, #F7F5FB 100%);
   border: 1px solid var(--border);
@@ -1166,6 +1226,10 @@ input {
 .promo-card strong,
 .promo-card p {
   display: block;
+  max-height: 64px;
+  overflow: hidden;
+  opacity: 1;
+  transition: max-height 240ms ease, margin 240ms ease, opacity 180ms ease, transform 240ms ease;
 }
 
 .promo-card strong {
@@ -1203,28 +1267,63 @@ input {
   .tile-card-preview,
   .layout-control,
   .promo-card {
-    transition: min-height 180ms ease, padding 180ms ease, gap 180ms ease, height 180ms ease;
+    transition: min-height 260ms ease, flex-basis 260ms ease, padding 260ms ease, gap 260ms ease, margin 260ms ease, grid-template-columns 260ms ease;
   }
 
   .side-panel:has(.tile-format-select[open]) .promo-card,
   .side-panel:has(.layout-options-select[open]) .promo-card {
-    min-height: 72px;
-    padding: 8px 10px;
+    min-height: 48px;
+    flex: 0 0 48px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(28px, auto) 0 0;
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 0;
+    margin-top: -4px;
+    margin-bottom: 4px;
+    padding: 8px 9px;
+  }
+
+  .side-panel:has(.tile-format-select[open]) .promo-card strong,
+  .side-panel:has(.tile-format-select[open]) .promo-card p,
+  .side-panel:has(.layout-options-select[open]) .promo-card strong,
+  .side-panel:has(.layout-options-select[open]) .promo-card p {
+    grid-column: 1 / -1;
+    max-height: 0;
+    margin-top: 0;
+    margin-bottom: 0;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  .side-panel:has(.tile-format-select[open]) .promo-card strong,
+  .side-panel:has(.layout-options-select[open]) .promo-card strong {
+    grid-row: 2;
   }
 
   .side-panel:has(.tile-format-select[open]) .promo-card p,
   .side-panel:has(.layout-options-select[open]) .promo-card p {
-    display: none;
+    grid-row: 3;
   }
 
   .side-panel:has(.tile-format-select[open]) .promo-card span,
   .side-panel:has(.layout-options-select[open]) .promo-card span {
-    margin-bottom: 3px;
+    grid-row: 1;
+    grid-column: 1;
+    margin: 0;
+    line-height: 1.2;
+    white-space: nowrap;
   }
 
   .side-panel:has(.tile-format-select[open]) .promo-card a,
   .side-panel:has(.layout-options-select[open]) .promo-card a {
-    min-height: 26px;
+    grid-row: 1;
+    grid-column: 2;
+    min-height: 28px;
+    margin: 0;
+    line-height: 1.2;
+    white-space: nowrap;
   }
 
   .side-panel:has(.tile-format-select[open]) .layout-move-card,
@@ -1274,6 +1373,26 @@ input {
   .side-panel:has(.tile-format-select[open]):has(.layout-options-select[open]) .origin-mode-grid button,
   .side-panel:has(.tile-format-select[open]):has(.layout-options-select[open]) .layout-secondary-grid button {
     min-height: 28px;
+  }
+
+  .side-panel:has(.origin-options-select[open]) .origin-options-content,
+  .side-panel:has(.movement-options-select[open]) .movement-options-content {
+    gap: 5px;
+    padding: 6px;
+  }
+
+  .side-panel:has(.origin-options-select[open]) .origin-options-content .origin-mode-grid {
+    gap: 4px;
+  }
+
+  .side-panel:has(.origin-options-select[open]) .origin-options-content .origin-mode-grid button {
+    min-height: 28px;
+    padding: 4px;
+  }
+
+  .side-panel:has(.movement-options-select[open]) .movement-options-content .layout-move-card {
+    gap: 4px;
+    padding: 0;
   }
 }
 

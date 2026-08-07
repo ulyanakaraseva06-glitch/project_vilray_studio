@@ -35,6 +35,18 @@ describe('room geometry', () => {
     ]);
   });
 
+  it('accepts diagonal walls and uses their real length', () => {
+    const contour = [{ x: 0, y: 0 }, { x: 3000, y: 0 }, { x: 2000, y: 2000 }, { x: 0, y: 1500 }];
+    expect(validateContour(contour).ok).toBe(true);
+    const surfaces = createSurfaces(contour, 2700);
+    expect(surfaces[2].widthMm).toBe(2236);
+  });
+
+  it('rejects self-intersecting room contours', () => {
+    const contour = [{ x: 0, y: 0 }, { x: 2000, y: 2000 }, { x: 0, y: 2000 }, { x: 2000, y: 0 }];
+    expect(validateContour(contour)).toMatchObject({ ok: false, message: 'Линии помещения не могут пересекаться.' });
+  });
+
   it('clamps room height to MVP limits', () => {
     expect(validateRoomHeight(1200)).toBe(1800);
     expect(validateRoomHeight(5000)).toBe(4500);

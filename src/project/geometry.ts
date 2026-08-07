@@ -4,6 +4,8 @@ export const MIN_SIDE_MM = 1;
 export const MAX_SIDE_MM = 15000;
 export const MIN_ROOM_HEIGHT_MM = 1800;
 export const MAX_ROOM_HEIGHT_MM = 4500;
+const MIN_ROOM_AREA_SQ_MM = 10_000;
+const MIN_INTERIOR_ANGLE_DEG = 10;
 
 export function createContourFromTemplate(template: RoomTemplate, size: [number, number] | undefined): PointMm[] {
   const [width, depth] = size ?? template.sizes[0] ?? [1700, 2000];
@@ -51,19 +53,26 @@ export function validateRoomHeight(heightMm: number): number {
 }
 
 export function validateContour(contour: PointMm[]): { ok: boolean; message?: string } {
-  if (contour.length < 4 || contour.length > 12) {
-    return { ok: false, message: 'Контур должен содержать от 4 до 12 стен.' };
+  if (contour.length < 3 || contour.length > 12) {
+    return { ok: false, message: 'Контур должен содержать от 3 до 12 стен.' };
   }
 
   for (let i = 0; i < contour.length; i += 1) {
     const current = contour[i];
     const next = contour[(i + 1) % contour.length];
-    const horizontal = current.y === next.y;
-    const vertical = current.x === next.x;
     const length = segmentLength(current, next);
 
-    if (!horizontal && !vertical) return { ok: false, message: 'Допустимы только углы 90°.' };
     if (length < MIN_SIDE_MM || length > MAX_SIDE_MM) return { ok: false, message: 'Сторона вне допустимого диапазона.' };
+  }
+
+  if (hasSelfIntersections(contour)) return { ok: false, message: 'Линии помещения не могут пересекаться.' };
+  if (polygonArea(contour) < MIN_ROOM_AREA_SQ_MM) return { ok: false, message: 'Контур помещения имеет слишком маленькую площадь.' };
+
+  for (let index = 0; index < contour.length; index += 1) {
+    const previous = contour[(index - 1 + contour.length) % contour.length];
+    const current = contour[index];
+    const next = contour[(index + 1) % contour.length];
+    if (interiorAngleDeg(previous, current, next) < MIN_INTERIOR_ANGLE_DEG) return { ok: false, message: 'Угол помещения слишком острый.' };
   }
 
   return { ok: true };
@@ -79,44 +88,54 @@ export function updateSegmentLength(contour: PointMm[], segmentIndex: number, ne
   if (dx === 0 && dy === 0) return contour;
 
   const updated = contour.map((point) => ({ ...point }));
-  const directionX = dx === 0 ? 0 : Math.sign(dx);
-  const directionY = dy === 0 ? 0 : Math.sign(dy);
+  const currentLength = Math.hypot(dx, dy);
+  const directionX = dx / currentLength;
+  const directionY = dy / currentLength;
   const newNext = {
     x: current.x + directionX * length,
     y: current.y + directionY * length,
   };
   const delta = { x: newNext.x - next.x, y: newNext.y - next.y };
 
-  // Changing a side moves the boundary line that contains the segment's next point.
-  if (dx !== 0) {
+  // Preserve the familiar rectangular resize behavior for orthogonal contours.
+  if (dy === 0) {
     for (const point of updated) {
       if (point.x === next.x) point.x += delta.x;
     }
-  } else {
+  } else if (dx === 0) {
     for (const point of updated) {
       if (point.y === next.y) point.y += delta.y;
     }
+  } else {
+    updated[(segmentIndex + 1) % updated.length] = newNext;
   }
 
-  return normalizeContour(updated);
+  const normalized = normalizeContour(updated);
+  return validateContour(normalized).ok ? normalized : contour;
 }
 
 export function moveWall(contour: PointMm[], segmentIndex: number, deltaMm: number): PointMm[] {
   const current = contour[segmentIndex];
   const next = contour[(segmentIndex + 1) % contour.length];
-  const horizontal = current.y === next.y;
+  const dx = next.x - current.x;
+  const dy = next.y - current.y;
+  const length = Math.hypot(dx, dy);
+  if (length === 0) return contour;
+  const normalX = dx === 0 ? 1 : dy === 0 ? 0 : -dy / length;
+  const normalY = dy === 0 ? 1 : dx === 0 ? 0 : dx / length;
   const updated = contour.map((point) => ({ ...point }));
 
   updated[segmentIndex] = {
-    x: updated[segmentIndex].x + (horizontal ? 0 : deltaMm),
-    y: updated[segmentIndex].y + (horizontal ? deltaMm : 0),
+    x: Math.round(updated[segmentIndex].x + normalX * deltaMm),
+    y: Math.round(updated[segmentIndex].y + normalY * deltaMm),
   };
   updated[(segmentIndex + 1) % updated.length] = {
-    x: updated[(segmentIndex + 1) % updated.length].x + (horizontal ? 0 : deltaMm),
-    y: updated[(segmentIndex + 1) % updated.length].y + (horizontal ? deltaMm : 0),
+    x: Math.round(updated[(segmentIndex + 1) % updated.length].x + normalX * deltaMm),
+    y: Math.round(updated[(segmentIndex + 1) % updated.length].y + normalY * deltaMm),
   };
 
-  return normalizeContour(updated);
+  const normalized = normalizeContour(updated);
+  return validateContour(normalized).ok ? normalized : contour;
 }
 
 export function normalizeRoomAreas(room: Room): RoomArea[] {
@@ -245,7 +264,54 @@ export function getBoundingBox(points: PointMm[]) {
 }
 
 export function segmentLength(a: PointMm, b: PointMm): number {
-  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+  return Math.round(Math.hypot(a.x - b.x, a.y - b.y));
+}
+
+export function polygonArea(points: PointMm[]): number {
+  return Math.abs(points.reduce((sum, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return sum + point.x * next.y - next.x * point.y;
+  }, 0)) / 2;
+}
+
+export function hasSelfIntersections(points: PointMm[]): boolean {
+  for (let first = 0; first < points.length; first += 1) {
+    const firstNext = (first + 1) % points.length;
+    for (let second = first + 1; second < points.length; second += 1) {
+      const secondNext = (second + 1) % points.length;
+      if (first === second || firstNext === second || secondNext === first) continue;
+      if (segmentsIntersect(points[first], points[firstNext], points[second], points[secondNext])) return true;
+    }
+  }
+  return false;
+}
+
+function interiorAngleDeg(previous: PointMm, current: PointMm, next: PointMm): number {
+  const ax = previous.x - current.x;
+  const ay = previous.y - current.y;
+  const bx = next.x - current.x;
+  const by = next.y - current.y;
+  const lengths = Math.hypot(ax, ay) * Math.hypot(bx, by);
+  if (!lengths) return 0;
+  const cosine = Math.max(-1, Math.min(1, (ax * bx + ay * by) / lengths));
+  return Math.acos(cosine) * 180 / Math.PI;
+}
+
+function segmentsIntersect(a: PointMm, b: PointMm, c: PointMm, d: PointMm): boolean {
+  const cross = (p: PointMm, q: PointMm, r: PointMm) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const abC = cross(a, b, c);
+  const abD = cross(a, b, d);
+  const cdA = cross(c, d, a);
+  const cdB = cross(c, d, b);
+  if (abC === 0 && onSegment(a, b, c)) return true;
+  if (abD === 0 && onSegment(a, b, d)) return true;
+  if (cdA === 0 && onSegment(c, d, a)) return true;
+  if (cdB === 0 && onSegment(c, d, b)) return true;
+  return Math.sign(abC) !== Math.sign(abD) && Math.sign(cdA) !== Math.sign(cdB);
+}
+
+function onSegment(a: PointMm, b: PointMm, point: PointMm): boolean {
+  return point.x >= Math.min(a.x, b.x) && point.x <= Math.max(a.x, b.x) && point.y >= Math.min(a.y, b.y) && point.y <= Math.max(a.y, b.y);
 }
 
 function clampInteger(value: number, min: number, max: number): number {

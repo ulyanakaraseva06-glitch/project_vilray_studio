@@ -1,6 +1,6 @@
 import { serviceConfig, templates, tileSizePresets } from '../config/appConfig';
 import type { FinishZone, Opening, Partition, ProjectSettings, RectZone, Room, RoomTemplate, Surface, TileMaterial, TileProject, TileSizePreset } from '../types/project';
-import { createContourFromTemplate, createSurfacesFromRoom, getBoundingBox, normalizeRoomModel, segmentLength, updateSegmentLength, validateRoomHeight } from './geometry';
+import { createContourFromTemplate, createSurfacesFromRoom, getBoundingBox, moveWall, normalizeRoomModel, segmentLength, updateSegmentLength, validateRoomHeight } from './geometry';
 
 const PRIMARY_MATERIAL_ID = 'material-primary';
 const DEFAULT_TILE_PRESET_ID = '600x1200';
@@ -72,6 +72,40 @@ export function updateRoomContour(project: TileProject, contour: TileProject['ro
 
 export function updateRoomSegmentLength(project: TileProject, segmentIndex: number, lengthMm: number): TileProject {
   return updateRoomContour(project, updateSegmentLength(project.room.contour, segmentIndex, lengthMm));
+}
+
+export function updateRoomAreaSegmentLength(project: TileProject, areaId: string, segmentIndex: number, lengthMm: number): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const room = normalizeRoomModel(normalized.room);
+  const areas = room.areas ?? [];
+  const areaIndex = areas.findIndex((area) => area.id === areaId);
+  if (areaIndex < 0) return normalized;
+  return updateRoomAreaContour(normalized, areaIndex, updateSegmentLength(areas[areaIndex].contour, segmentIndex, lengthMm));
+}
+
+export function moveRoomAreaWall(project: TileProject, areaId: string, segmentIndex: number, deltaMm: number): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const room = normalizeRoomModel(normalized.room);
+  const areas = room.areas ?? [];
+  const areaIndex = areas.findIndex((area) => area.id === areaId);
+  if (areaIndex < 0) return normalized;
+  return updateRoomAreaContour(normalized, areaIndex, moveWall(areas[areaIndex].contour, segmentIndex, deltaMm));
+}
+
+function updateRoomAreaContour(project: TileProject, areaIndex: number, contour: TileProject['room']['contour']): TileProject {
+  const materialId = getPrimaryMaterial(project)?.id ?? null;
+  const areas = project.room.areas ?? [];
+  const room = normalizeRoomModel({
+    ...project.room,
+    contour: areaIndex === 0 ? contour : project.room.contour,
+    areas: areas.map((area, index) => index === areaIndex ? { ...area, contour } : area),
+  });
+  return {
+    ...project,
+    updatedAt: new Date().toISOString(),
+    room,
+    surfaces: createSurfacesWithAssignments(room, project, materialId),
+  };
 }
 
 export function updatePrimaryTileMaterial(project: TileProject, tile: TileSizePreset): TileProject {
@@ -310,6 +344,83 @@ export function addAdjacentRoom(project: TileProject): TileProject {
   };
 }
 
+export function addRoomFromTemplate(project: TileProject, template: RoomTemplate, size?: [number, number]): TileProject {
+  return addRoomFromContour(project, createContourFromTemplate(template, size));
+}
+
+export function addRoomFromContour(project: TileProject, contour: TileProject['room']['contour']): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const room = normalizeRoomModel(normalized.room);
+  const materialId = getPrimaryMaterial(normalized)?.id ?? null;
+  const areas = room.areas ?? [];
+  const localBox = getBoundingBox(contour);
+  const rightEdge = Math.max(...areas.map((area) => getBoundingBox(area.contour).maxX));
+  const baseTop = getBoundingBox(areas[0]?.contour ?? room.contour).minY;
+  const areaIndex = areas.length + 1;
+  const areaId = `room-${areaIndex}`;
+  const offsetX = rightEdge + 500 - localBox.minX;
+  const offsetY = baseTop - localBox.minY;
+  const area = {
+    id: areaId,
+    name: `Помещение ${areaIndex}`,
+    contour: contour.map((point) => ({ x: Math.round(point.x + offsetX), y: Math.round(point.y + offsetY) })),
+  };
+  const nextRoom = normalizeRoomModel({ ...room, areas: [...areas, area] });
+  return {
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+    room: nextRoom,
+    surfaces: createSurfacesWithAssignments(nextRoom, normalized, materialId),
+  };
+}
+
+export function moveRoomArea(project: TileProject, areaId: string, deltaXmm: number, deltaYmm: number): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const room = normalizeRoomModel(normalized.room);
+  const areas = room.areas ?? [];
+  const areaIndex = areas.findIndex((area) => area.id === areaId);
+  if (areaIndex <= 0) return normalized;
+  let movedContour = areas[areaIndex].contour.map((point) => ({
+    x: Math.round(point.x + deltaXmm),
+    y: Math.round(point.y + deltaYmm),
+  }));
+  let movedBox = getBoundingBox(movedContour);
+  const snapDistanceMm = 180;
+  let snapX = 0;
+  let snapY = 0;
+  for (const [index, area] of areas.entries()) {
+    if (index === areaIndex) continue;
+    const box = getBoundingBox(area.contour);
+    const xCandidates = [box.maxX - movedBox.minX, box.minX - movedBox.maxX].filter((value) => Math.abs(value) <= snapDistanceMm);
+    const yCandidates = [box.maxY - movedBox.minY, box.minY - movedBox.maxY].filter((value) => Math.abs(value) <= snapDistanceMm);
+    const nextX = xCandidates.sort((a, b) => Math.abs(a) - Math.abs(b))[0];
+    const nextY = yCandidates.sort((a, b) => Math.abs(a) - Math.abs(b))[0];
+    if (nextX !== undefined && (!snapX || Math.abs(nextX) < Math.abs(snapX))) snapX = nextX;
+    if (nextY !== undefined && (!snapY || Math.abs(nextY) < Math.abs(snapY))) snapY = nextY;
+  }
+  if (snapX || snapY) {
+    movedContour = movedContour.map((point) => ({ x: point.x + snapX, y: point.y + snapY }));
+    movedBox = getBoundingBox(movedContour);
+  }
+  const overlaps = areas.some((area, index) => {
+    if (index === areaIndex) return false;
+    const box = getBoundingBox(area.contour);
+    return movedBox.minX < box.maxX && movedBox.maxX > box.minX && movedBox.minY < box.maxY && movedBox.maxY > box.minY;
+  });
+  if (overlaps) return normalized;
+  const nextRoom = normalizeRoomModel({
+    ...room,
+    areas: areas.map((area, index) => index === areaIndex ? { ...area, contour: movedContour } : area),
+  });
+  const materialId = getPrimaryMaterial(normalized)?.id ?? null;
+  return {
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+    room: nextRoom,
+    surfaces: createSurfacesWithAssignments(nextRoom, normalized, materialId),
+  };
+}
+
 export function addOpening(project: TileProject, surfaceId: string, kind: Opening['kind']): TileProject {
   const normalized = ensureProjectDefaults(project);
   const surface = normalized.surfaces.find((item) => item.id === surfaceId && item.type === 'wall');
@@ -325,6 +436,55 @@ export function addOpening(project: TileProject, surfaceId: string, kind: Openin
     updatedAt: new Date().toISOString(),
     room,
     surfaces: createSurfacesWithAssignments(room, normalized, materialId),
+  };
+}
+
+export function moveOpening(project: TileProject, openingId: string, xMm: number): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const opening = normalized.room.openings?.find((item) => item.id === openingId);
+  const surface = opening ? normalized.surfaces.find((item) => item.id === opening.surfaceId && item.type === 'wall') : null;
+  if (!opening || !surface) return normalized;
+  const nextXmm = Math.max(0, Math.min(Math.round(xMm), Math.max(0, surface.widthMm - opening.widthMm)));
+  return updateOpening(normalized, openingId, (item) => ({ ...item, xMm: nextXmm }));
+}
+
+export function resetOpening(project: TileProject, openingId: string): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const opening = normalized.room.openings?.find((item) => item.id === openingId);
+  const surface = opening ? normalized.surfaces.find((item) => item.id === opening.surfaceId && item.type === 'wall') : null;
+  if (!opening || !surface) return normalized;
+  const centeredXmm = Math.max(0, Math.round((surface.widthMm - opening.widthMm) / 2));
+  const initialXmm = Math.max(0, Math.min(opening.initialXmm ?? centeredXmm, Math.max(0, surface.widthMm - opening.widthMm)));
+  return updateOpening(normalized, openingId, (item) => ({ ...item, xMm: initialXmm }));
+}
+
+export function deleteOpening(project: TileProject, openingId: string): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  if (!normalized.room.openings?.some((item) => item.id === openingId)) return normalized;
+  const materialId = getPrimaryMaterial(normalized)?.id ?? null;
+  const room = normalizeRoomModel({
+    ...normalized.room,
+    openings: normalized.room.openings.filter((item) => item.id !== openingId),
+  });
+  return {
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+    room,
+    surfaces: createSurfacesWithAssignments(room, normalized, materialId),
+  };
+}
+
+function updateOpening(project: TileProject, openingId: string, update: (opening: Opening) => Opening): TileProject {
+  const materialId = getPrimaryMaterial(project)?.id ?? null;
+  const room = normalizeRoomModel({
+    ...project.room,
+    openings: (project.room.openings ?? []).map((opening) => opening.id === openingId ? update(opening) : opening),
+  });
+  return {
+    ...project,
+    updatedAt: new Date().toISOString(),
+    room,
+    surfaces: createSurfacesWithAssignments(room, project, materialId),
   };
 }
 
@@ -505,12 +665,14 @@ function findRightWallId(contour: TileProject['room']['contour'], prefix: string
 function createCenteredOpening(surfaceId: string, kind: Opening['kind'], surfaceWidthMm: number, roomHeightMm: number): Opening {
   const widthMm = kind === 'door' ? DEFAULT_DOOR_WIDTH_MM : DEFAULT_PASSAGE_WIDTH_MM;
   const heightMm = kind === 'door' ? Math.min(DEFAULT_DOOR_HEIGHT_MM, roomHeightMm) : roomHeightMm;
+  const xMm = Math.max(0, Math.round((surfaceWidthMm - widthMm) / 2));
   return {
     id: `${surfaceId}-${kind}-${Date.now()}-${Math.round(Math.random() * 1000)}`,
     kind,
+    initialXmm: xMm,
     name: kind === 'door' ? 'Дверь' : 'Проход',
     surfaceId,
-    xMm: Math.max(0, Math.round((surfaceWidthMm - widthMm) / 2)),
+    xMm,
     yMm: Math.max(0, roomHeightMm - heightMm),
     widthMm: Math.min(surfaceWidthMm, widthMm),
     heightMm,
