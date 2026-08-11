@@ -34,6 +34,7 @@ export interface RectLayoutInput {
 }
 
 export interface PolygonLayoutInput {
+  blockedRects?: RectZone[];
   layout: LayoutSettings;
   maxPieces?: number;
   points: PointMm[];
@@ -112,6 +113,7 @@ export function generatePolygonLayout(input: PolygonLayoutInput): RectLayoutResu
   const normalizedPolygon = input.points.map((point) => ({ x: point.x - box.minX, y: point.y - box.minY }));
   const cells = decomposeOrthogonalPolygon(input.points, box);
   const rectResult = generateRectLayout({
+    blockedRects: input.blockedRects,
     heightMm: box.height,
     layout: input.layout,
     maxPieces: input.maxPieces,

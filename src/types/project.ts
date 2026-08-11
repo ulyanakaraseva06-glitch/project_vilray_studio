@@ -98,13 +98,18 @@ export interface RoomArea {
   id: string;
   name: string;
   contour: PointMm[];
+  heightMm?: number;
+  shapeLocked?: boolean;
 }
 
 export interface Opening {
+  connectedOpeningId?: string;
   id: string;
   initialXmm?: number;
-  kind: 'door' | 'passage';
+  initialYmm?: number;
+  kind: 'door' | 'passage' | 'window';
   name: string;
+  number?: number;
   surfaceId: string;
   xMm: number;
   yMm: number;
@@ -113,12 +118,31 @@ export interface Opening {
 }
 
 export interface Partition {
+  areaId?: string;
   id: string;
+  initialEnd?: PointMm;
+  initialStart?: PointMm;
   name: string;
   start: PointMm;
   end: PointMm;
   thicknessMm: number;
   heightMm: number;
+}
+
+export interface RoomObject {
+  areaId: string;
+  excludeTile: boolean;
+  heightMm: number;
+  id: string;
+  initialElevationMm: number;
+  initialXmm: number;
+  initialYmm: number;
+  lengthMm: number;
+  name: string;
+  elevationMm: number;
+  widthMm: number;
+  xMm: number;
+  yMm: number;
 }
 
 export interface Room {
@@ -163,7 +187,7 @@ export interface TileProject {
   updatedAt: string;
   room: Room;
   surfaces: Surface[];
-  objects: [];
+  objects: RoomObject[];
   materials: TileMaterial[];
   settings: ProjectSettings;
 }

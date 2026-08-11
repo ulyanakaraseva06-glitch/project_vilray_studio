@@ -1,5 +1,7 @@
 import { generatePolygonLayout, generateRectLayout } from '../layout/layoutEngine';
 import type { LayoutEdgeCuts } from '../layout/layoutEngine';
+import { getBoundingBox } from '../project/geometry';
+import { getRoomObjectWallProjection } from '../project/projectFactory';
 import type { FinishZone, Surface, TileMaterial, TileProject } from '../types/project';
 
 export interface ZoneCalculation {
@@ -50,7 +52,7 @@ export function calculateProject(project: TileProject): ProjectCalculation {
     surface.zones.flatMap((zone) => {
       const material = project.materials.find((item) => item.id === zone.materialId) ?? project.materials[0];
       if (!material) return [];
-      const layout = calculateZoneLayout(zone, surface, material);
+      const layout = calculateZoneLayout(project, zone, surface, material);
       const totalPieces = layout.fullCount + layout.cutCount + layout.criticalCount;
       const reservePercent = material.reservePercent ?? project.settings.reservePercent;
       const reservePieces = Math.ceil(totalPieces * (reservePercent / 100));
@@ -105,17 +107,19 @@ export function calculateProject(project: TileProject): ProjectCalculation {
   };
 }
 
-function calculateZoneLayout(zone: FinishZone, surface: Surface, material: TileMaterial) {
+function calculateZoneLayout(project: TileProject, zone: FinishZone, surface: Surface, material: TileMaterial) {
+  const blockedRects = getBlockedRectsForZone(project, zone, surface);
   const result =
     zone.shape.type === 'polygon'
       ? generatePolygonLayout({
+          blockedRects,
           layout: zone.layout,
           points: zone.shape.points,
           tileHeightMm: material.heightMm,
           tileWidthMm: material.widthMm,
         })
       : generateRectLayout({
-          blockedRects: getBlockedRectsForZone(zone, surface),
+          blockedRects,
           heightMm: zone.shape.heightMm || surface.heightMm,
           layout: zone.layout,
           tileHeightMm: material.heightMm,
@@ -129,15 +133,53 @@ function calculateZoneLayout(zone: FinishZone, surface: Surface, material: TileM
   };
 }
 
-function getBlockedRectsForZone(zone: FinishZone, surface: Surface) {
-  if (surface.type !== 'wall' || zone.shape.type !== 'rect') return [];
-  return surface.openings.map((opening) => ({
-    type: 'rect' as const,
-    xMm: Math.max(0, opening.xMm - zone.shape.xMm),
-    yMm: Math.max(0, opening.yMm - zone.shape.yMm),
-    widthMm: Math.min(opening.widthMm, zone.shape.widthMm),
-    heightMm: Math.min(opening.heightMm, zone.shape.heightMm),
-  }));
+function getBlockedRectsForZone(project: TileProject, zone: FinishZone, surface: Surface) {
+  const blockedRects: Array<{ type: 'rect'; xMm: number; yMm: number; widthMm: number; heightMm: number }> = [];
+
+  if (surface.type === 'wall' && zone.shape.type === 'rect') {
+    const shape = zone.shape;
+    blockedRects.push(...surface.openings.map((opening) => ({
+      type: 'rect' as const,
+      xMm: opening.xMm - shape.xMm,
+      yMm: opening.yMm - shape.yMm,
+      widthMm: opening.widthMm,
+      heightMm: opening.heightMm,
+    })));
+    for (const object of project.objects) {
+      if (!object.excludeTile) continue;
+      const projection = getRoomObjectWallProjection(project, surface.id, object);
+      if (!projection) continue;
+      blockedRects.push({
+        type: 'rect',
+        xMm: projection.offsetMm - shape.xMm,
+        yMm: surface.heightMm - object.elevationMm - object.heightMm - shape.yMm,
+        widthMm: projection.widthMm,
+        heightMm: object.heightMm,
+      });
+    }
+  }
+
+  if (surface.type === 'floor') {
+    const areaId = surface.sourceRef?.split(':')[1];
+    const area = project.room.areas?.find((item) => item.id === areaId);
+    if (!area) return blockedRects;
+    const areaBox = getBoundingBox(area.contour);
+    const zoneOrigin = zone.shape.type === 'polygon'
+      ? getBoundingBox(zone.shape.points)
+      : { minX: areaBox.minX + zone.shape.xMm, minY: areaBox.minY + zone.shape.yMm };
+    for (const object of project.objects) {
+      if (!object.excludeTile || object.areaId !== area.id) continue;
+      blockedRects.push({
+        type: 'rect',
+        xMm: object.xMm - zoneOrigin.minX,
+        yMm: object.yMm - zoneOrigin.minY,
+        widthMm: object.lengthMm,
+        heightMm: object.widthMm,
+      });
+    }
+  }
+
+  return blockedRects;
 }
 
 function sum(values: number[]): number {

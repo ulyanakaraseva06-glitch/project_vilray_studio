@@ -1,8 +1,9 @@
+/// <reference types="vitest/config" />
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
-export default defineConfig({
+const config = {
   plugins: [react()],
   build: {
     rollupOptions: {
@@ -17,4 +18,6 @@ export default defineConfig({
     globals: true,
     setupFiles: './src/test/setup.ts',
   },
-});
+};
+
+export default defineConfig(config);

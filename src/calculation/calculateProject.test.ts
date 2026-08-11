@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { templates } from '../config/appConfig';
-import { addFloorZone, addOpening, addWallZone, createProjectFromTemplate, updateZoneTileMaterial } from '../project/projectFactory';
+import { addFloorZone, addOpening, addPartition, addRoomObject, addWallZone, createProjectFromTemplate, updateZoneTileMaterial } from '../project/projectFactory';
 import { calculateProject } from './calculateProject';
 
 describe('calculateProject', () => {
@@ -45,5 +45,27 @@ describe('calculateProject', () => {
     const withDoor = calculateProject(addOpening(project, 'surface-wall-1', 'door'));
 
     expect(withDoor.totalAreaM2).toBeLessThan(baseline.totalAreaM2);
+  });
+
+  it('subtracts a window and counts both faces of a partition', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const baseline = calculateProject(project);
+    const withWindow = calculateProject(addOpening(project, 'surface-wall-1', 'window'));
+    const partitionedProject = addPartition(project, { x: 0, y: 500 }, { x: 1000, y: 500 }, 'room-1');
+    const withPartition = calculateProject(partitionedProject);
+
+    expect(withWindow.totalAreaM2).toBeLessThan(baseline.totalAreaM2);
+    expect(withPartition.totalAreaM2).toBeGreaterThan(baseline.totalAreaM2);
+    expect(withPartition.zones.filter((zone) => zone.surfaceId.startsWith('surface-partition-'))).toHaveLength(2);
+  });
+
+  it('subtracts an object only when tile is disabled behind it', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const baseline = calculateProject(project);
+    const tiledObject = addRoomObject(project, { areaId: 'room-1', excludeTile: false, heightMm: 850, lengthMm: 800, name: 'Шкаф', widthMm: 500 }).project;
+    const untiledObject = addRoomObject(project, { areaId: 'room-1', excludeTile: true, heightMm: 850, lengthMm: 800, name: 'Шкаф', widthMm: 500 }).project;
+
+    expect(calculateProject(tiledObject).totalAreaM2).toBe(baseline.totalAreaM2);
+    expect(calculateProject(untiledObject).totalAreaM2).toBeLessThan(baseline.totalAreaM2);
   });
 });

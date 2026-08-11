@@ -143,17 +143,30 @@ export function normalizeRoomAreas(room: Room): RoomArea[] {
   return areas.map((area, index) => ({
     id: area.id || `room-${index + 1}`,
     name: area.name || `Помещение ${index + 1}`,
+    heightMm: area.heightMm ?? room.heightMm,
+    shapeLocked: area.shapeLocked,
     contour: area.contour?.length ? area.contour : room.contour,
   }));
 }
 
 export function normalizeRoomModel(room: Room): Room {
   const areas = normalizeRoomAreas(room);
+  const counters: Record<'door' | 'passage', number> = { door: 0, passage: 0 };
+  const openings = (room.openings ?? []).map((opening) => {
+    if (opening.kind === 'window') return opening;
+    if (opening.number) {
+      counters[opening.kind] = Math.max(counters[opening.kind], opening.number);
+      return opening;
+    }
+    counters[opening.kind] += 1;
+    return { ...opening, number: counters[opening.kind] };
+  });
   return {
     ...room,
+    heightMm: areas[0]?.heightMm ?? room.heightMm,
     contour: areas[0]?.contour ?? room.contour,
     areas,
-    openings: room.openings ?? [],
+    openings,
     partitions: room.partitions ?? [],
   };
 }
@@ -174,7 +187,7 @@ export function createSurfacesFromRoom(roomInput: Room, materialId?: string | nu
         heightMm,
         id,
         materialId,
-        name: `${partition.name || `Перегородка ${partitionIndex + 1}`} ${side === 'a' ? 'A' : 'B'}`,
+        name: `${partition.name || `Перегородка ${partitionIndex + 1}`} — ${side === 'a' ? 'сторона 1' : 'сторона 2'}`,
         openings: room.openings?.filter((opening) => opening.surfaceId === id) ?? [],
         settings,
         sourceRef: `partition:${partition.id}:${side}`,
@@ -206,7 +219,7 @@ function createAreaSurfaces(area: RoomArea, areaIndex: number, room: Room, mater
     const next = area.contour[(index + 1) % area.contour.length];
     const wallId = areaIndex === 0 ? `surface-wall-${index + 1}` : `surface-wall-${area.id}-${index + 1}`;
     return createWallSurface({
-      heightMm: room.heightMm,
+      heightMm: area.heightMm ?? room.heightMm,
       id: wallId,
       materialId,
       name: areaIndex === 0 ? `Стена ${index + 1}` : `Стена ${areaIndex + 1}.${index + 1}`,

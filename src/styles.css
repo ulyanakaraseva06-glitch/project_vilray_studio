@@ -161,12 +161,32 @@ input {
 }
 
 .canvas-area {
+  position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   padding: 10px;
   overflow: hidden;
+}
+
+.room-action-message {
+  position: absolute;
+  z-index: 8;
+  top: 24px;
+  left: 50%;
+  width: min(520px, calc(100% - 48px));
+  padding: 11px 14px;
+  color: var(--primary-dark);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--primary-mid);
+  border-radius: 9px;
+  box-shadow: 0 10px 30px rgba(38, 24, 50, 0.16);
+  font-size: 13px;
+  line-height: 1.35;
+  text-align: center;
+  transform: translateX(-50%);
+  pointer-events: none;
 }
 
 .canvas-card {
@@ -225,8 +245,8 @@ input {
 }
 
 .canvas-toolbar {
-  right: 12px;
-  top: 12px;
+  left: 12px;
+  bottom: 12px;
 }
 
 .canvas-toolbar span {
@@ -242,17 +262,27 @@ input {
 }
 
 .drawing-controls {
-  left: 12px;
-  bottom: 12px;
-  max-width: calc(100% - 24px);
+  left: 300px;
+  top: 12px;
+  max-width: calc(100% - 312px);
   gap: 8px;
   padding: 10px;
+}
+
+@media (max-width: 1400px) {
+  .drawing-controls {
+    right: 12px;
+    left: 12px;
+    top: 54px;
+    max-width: none;
+    flex-wrap: wrap;
+  }
 }
 
 .drawing-controls strong {
   color: var(--text);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -279,13 +309,19 @@ input {
   cursor: pointer;
   font-family: inherit;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 500;
   line-height: 1;
   white-space: nowrap;
   transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease, transform 180ms ease;
 }
 
 .drawing-controls > .drawing-complete {
+  color: var(--text);
+  background: var(--bg-white);
+  border-color: var(--border);
+}
+
+.drawing-controls > .drawing-complete:active:not(:disabled) {
   color: var(--bg-white);
   background: var(--primary);
   border-color: var(--primary);
@@ -293,16 +329,15 @@ input {
 
 .drawing-mode-options {
   display: inline-flex;
-  gap: 4px;
-  padding: 3px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  gap: 8px;
+  padding: 0;
+  background: transparent;
+  border: 0;
 }
 
 .drawing-controls .drawing-mode-options button {
-  min-height: 28px;
-  padding: 0 10px;
+  min-height: 34px;
+  padding: 0 11px;
   font-size: 12px;
 }
 
@@ -569,6 +604,10 @@ input {
   gap: 7px;
 }
 
+.room-tools-stats {
+  grid-template-columns: 1fr;
+}
+
 .room-tools-stats span {
   min-width: 0;
   padding: 7px 8px;
@@ -596,6 +635,12 @@ input {
   cursor: not-allowed;
   background: var(--bg);
   border-color: var(--border);
+}
+
+.room-tools-actions button.active {
+  color: var(--bg-white);
+  background: var(--primary);
+  border-color: var(--primary);
 }
 
 .shape-icon {
@@ -1436,6 +1481,305 @@ input {
   width: min(720px, 100%);
 }
 
+.opening-connection-dialog {
+  width: min(520px, 100%);
+}
+
+.opening-connection-options {
+  display: grid;
+  gap: 8px;
+  max-height: 310px;
+  margin-top: 18px;
+  overflow: auto;
+}
+
+.opening-connection-options button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 48px;
+  padding: 10px 12px;
+  color: var(--primary-dark);
+  background: var(--primary-light);
+  border: 1px solid var(--primary-mid);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+}
+
+.opening-connection-options button:hover {
+  background: #eadff5;
+  border-color: var(--primary);
+}
+
+.opening-connection-options span {
+  color: var(--text-sec);
+  font-size: 12px;
+}
+
+.objects-panel {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.object-editor {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.object-editor label {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  color: var(--text-sec);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.object-editor-wide {
+  grid-column: 1 / -1;
+}
+
+.object-editor input,
+.object-editor select {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 9px;
+  color: var(--text);
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  font: inherit;
+}
+
+.object-editor input:focus,
+.object-editor select:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(163, 133, 196, 0.15);
+}
+
+.object-editor .object-tile-checkbox {
+  display: flex;
+  min-height: 36px;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  color: var(--text);
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.object-editor .object-tile-checkbox input {
+  width: 16px;
+  min-height: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  accent-color: var(--primary);
+  box-shadow: none;
+}
+
+.object-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.object-editor-actions button,
+.object-list-actions button {
+  min-height: 34px;
+  padding: 0 11px;
+  color: #FFFFFF;
+  background: var(--primary);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.object-editor-actions button.secondary {
+  color: var(--text-sec);
+  background: var(--bg-white);
+  border-color: var(--border);
+}
+
+.object-room-groups,
+.object-room-list {
+  display: grid;
+  gap: 7px;
+}
+
+.object-room-group {
+  overflow: hidden;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.object-room-group summary {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 11px;
+  color: var(--text);
+  background: var(--primary-light);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  list-style-position: inside;
+}
+
+.object-room-group summary small {
+  min-width: 24px;
+  padding: 2px 7px;
+  color: var(--primary-dark);
+  background: var(--bg-white);
+  border-radius: 999px;
+  text-align: center;
+}
+
+.object-room-list {
+  padding: 7px;
+}
+
+.object-room-list > p {
+  margin: 3px;
+  color: var(--text-sec);
+  font-size: 12px;
+}
+
+.object-room-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.object-room-list article:hover {
+  border-color: var(--primary);
+}
+
+.object-room-list article > div:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.object-room-list strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.object-room-list span,
+.object-room-list article small {
+  color: var(--text-sec);
+  font-size: 11px;
+}
+
+.object-room-list article small {
+  color: var(--primary-dark);
+}
+
+.object-list-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.object-list-actions button {
+  min-height: 30px;
+  padding: 0 8px;
+  color: var(--primary-dark);
+  background: var(--bg-white);
+  border-color: var(--primary-mid);
+}
+
+.object-list-actions button.danger-lite {
+  color: #9B3E54;
+  border-color: #E1B7C0;
+}
+
+.room-name-dialog {
+  display: grid;
+  gap: 16px;
+}
+
+.room-name-dialog label {
+  display: grid;
+  gap: 6px;
+  color: var(--text-sec);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.room-name-dialog input {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  font: inherit;
+}
+
+.room-name-dialog input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(163, 133, 196, 0.15);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+}
+
+.dialog-actions button {
+  min-height: 38px;
+  padding: 0 16px;
+  color: #fff;
+  background: var(--primary);
+  border: 1px solid var(--primary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.dialog-actions button.secondary {
+  color: var(--text-sec);
+  background: var(--bg-white);
+  border-color: var(--border);
+}
+
+.dialog-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .template-picker-dialog h2 {
   margin-bottom: 16px;
 }
@@ -1757,7 +2101,8 @@ input {
 
   .drawing-controls {
     left: 8px;
-    bottom: 8px;
+    top: 54px;
+    bottom: auto;
     max-width: calc(100% - 16px);
     flex-wrap: wrap;
   }
