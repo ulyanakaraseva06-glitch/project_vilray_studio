@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = dirname(fileURLToPath(import.meta.url)).replace(/\\scripts$/, '');
+const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const sourcePath = join(root, 'content', 'seo', 'pages.json');
 const pages = JSON.parse(await readFile(sourcePath, 'utf8'));
 
