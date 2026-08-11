@@ -2574,7 +2574,7 @@ function WallsLayer({
             x={section.x}
             y={section.headerY}
             width={section.width}
-            height={34}
+            height={126}
             fill={section.expanded ? '#F2EBF9' : '#F8F5FB'}
             stroke="#CDB9DF"
             strokeWidth={1}
@@ -2582,10 +2582,10 @@ function WallsLayer({
             shadowColor="rgba(45, 31, 58, 0.08)"
             shadowBlur={5}
           />
-          <Text x={section.x + 14} y={section.headerY + 9} text={section.name} fill="#4E4458" fontSize={14} />
+          <Text x={section.x + 16} y={section.headerY + 54} text={section.name} fill="#4E4458" fontSize={15} />
           <Text
-            x={section.x + section.width - 68}
-            y={section.headerY + 7}
+            x={section.x + section.width - 72}
+            y={section.headerY + 53}
             width={24}
             align="center"
             text="✎"
@@ -2594,7 +2594,7 @@ function WallsLayer({
             onClick={(event) => { event.cancelBubble = true; onRenameArea(section.areaId); }}
             onTap={(event) => { event.cancelBubble = true; onRenameArea(section.areaId); }}
           />
-          <Text x={section.x + section.width - 34} y={section.headerY + 9} width={20} align="center" text={section.expanded ? '▲' : '▼'} fill="#8A6AAE" fontSize={13} />
+          <Text x={section.x + section.width - 34} y={section.headerY + 55} width={20} align="center" text={section.expanded ? '▲' : '▼'} fill="#8A6AAE" fontSize={13} />
         </Group>
       ))}
       {frames.map((frame) => {
@@ -2618,7 +2618,7 @@ function WallsLayer({
               y={frame.y}
               width={frame.width}
               height={frame.height}
-              fill={active ? '#F2EBF9' : '#FFFFFF'}
+              fill="#FFFFFF"
             />
             {material && layout && surface?.zones[0] ? (
               <WallTileLayout
@@ -2676,7 +2676,15 @@ function WallsLayer({
                 />
               )];
             })}
-            <Rect x={frame.x} y={frame.y} width={frame.width} height={frame.height} stroke={active ? '#8A6AAE' : '#D0D0D8'} strokeWidth={active ? 3 : 1} listening={false} />
+            <Rect
+              x={frame.x}
+              y={frame.y}
+              width={frame.width}
+              height={frame.height}
+              stroke={active ? '#7B43AF' : '#D0D0D8'}
+              strokeWidth={active ? 5 : 1}
+              listening={false}
+            />
             <Text x={frame.x} y={frame.y - 21} width={frame.width} align="center" text={frame.name} fill="#6B6B80" fontSize={13} listening={false} />
             {dimensionsVisible ? (
               <DimensionLabel
@@ -3976,19 +3984,26 @@ function getWallLayout(project: TileProject, view: PlanViewTransform, collapsedA
 
   const frames: WallFrame[] = [];
   const sections: WallAreaSection[] = [];
+  const horizontalInset = 16;
+  const sectionWidth = Math.max(
+    320,
+    ...areas.map((area) => (wallsByArea.get(area.id) ?? []).slice(0, 4).reduce(
+      (width, { wall }, index) => width + mmToCanvas(wall.widthMm) + (index ? gap : 0),
+      horizontalInset * 2,
+    )),
+  );
   for (const area of areas) {
     const areaWalls = wallsByArea.get(area.id) ?? [];
     const expanded = !collapsedAreaIds.has(area.id);
-    const sectionWidth = 320;
     const headerY = sectionY;
-    sections.push({ areaId: area.id, expanded, headerY, name: area.name, width: sectionWidth, x: startX });
+    sections.push({ areaId: area.id, expanded, headerY, name: area.name, width: sectionWidth, x: startX - horizontalInset });
 
     if (!expanded) {
-      sectionY += 48;
+      sectionY += 140;
       continue;
     }
 
-    const frameY = headerY + 66;
+    const frameY = headerY + 158;
     let frameX = startX;
     let maxHeight = mmToCanvas(area.heightMm ?? project.room.heightMm);
     for (const { index, wall } of areaWalls) {
