@@ -265,9 +265,9 @@ export function updateZoneLayoutOffset(project: TileProject, surfaceId: string, 
 
 export type ZonePresetKind = 'rect' | 'shower' | 'horizontal-band' | 'vertical-band';
 
-export function addFloorZone(project: TileProject, kind: ZonePresetKind): TileProject {
+export function addFloorZone(project: TileProject, kind: ZonePresetKind, surfaceId = 'surface-floor'): TileProject {
   const normalized = ensureProjectDefaults(project);
-  const floor = normalized.surfaces.find((surface) => surface.id === 'surface-floor');
+  const floor = normalized.surfaces.find((surface) => surface.id === surfaceId && surface.type === 'floor');
   if (!floor) return normalized;
   const baseZone = floor.zones[0];
   const zone = createFloorZone(floor, baseZone?.materialId ?? getPrimaryMaterial(normalized)?.id ?? null, normalized.settings, kind);
@@ -283,6 +283,33 @@ export function addWallZone(project: TileProject, surfaceId: string, kind: Exclu
   const zone = createFloorZone(wall, baseZone?.materialId ?? getPrimaryMaterial(normalized)?.id ?? null, normalized.settings, kind);
 
   return appendZone(normalized, wall.id, zone);
+}
+
+export function addManualZone(project: TileProject, surfaceId: string, points: PointMm[]): { project: TileProject; zone: FinishZone | null } {
+  const normalized = ensureProjectDefaults(project);
+  const surface = normalized.surfaces.find((item) => item.id === surfaceId);
+  if (!surface || points.length < 2) return { project: normalized, zone: null };
+  const baseZone = surface.zones[0];
+  const seed = createFloorZone(surface, baseZone?.materialId ?? getPrimaryMaterial(normalized)?.id ?? null, normalized.settings, 'rect');
+  const box = getBoundingBox(points);
+  const surfaceBox = surface.type === 'floor' && baseZone?.shape.type === 'polygon' ? getBoundingBox(baseZone.shape.points) : { minX: 0, minY: 0 };
+  const shape = clampRectZone({
+    type: 'rect',
+    xMm: Math.round(box.minX - surfaceBox.minX),
+    yMm: Math.round(box.minY - surfaceBox.minY),
+    widthMm: Math.round(box.width),
+    heightMm: Math.round(box.height),
+  }, surface);
+  const zone: FinishZone = {
+    ...seed,
+    id: `${surface.id}-manual-zone-${Date.now()}`,
+    name: `Ручная зона ${surface.zones.length}`,
+    relatedSurfaceIds: surface.type === 'floor'
+      ? normalized.surfaces.filter((item) => item.type === 'wall' && item.sourceRef?.startsWith(`wall:${surface.sourceRef?.split(':')[1]}:`)).map((item) => item.id)
+      : undefined,
+    shape,
+  };
+  return { project: appendZone(normalized, surface.id, zone), zone };
 }
 
 export function updateZoneShape(project: TileProject, surfaceId: string, zoneId: string, patch: Partial<RectZone>): TileProject {
@@ -305,6 +332,50 @@ export function updateZoneShape(project: TileProject, surfaceId: string, zoneId:
             zones: surface.zones.map((item) => (item.id === zoneId ? { ...item, shape: nextShape } : item)),
           }
         : surface,
+    ),
+  };
+}
+
+export function updateZonePolygonPoints(project: TileProject, surfaceId: string, zoneId: string, points: PointMm[]): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const surface = normalized.surfaces.find((item) => item.id === surfaceId);
+  const zoneIndex = surface?.zones.findIndex((zone) => zone.id === zoneId) ?? -1;
+  if (!surface || zoneIndex <= 0 || points.length < 3) return normalized;
+  const zone = surface.zones[zoneIndex];
+  if (zone.shape.type !== 'polygon') return normalized;
+  const nextPoints = points.map((point) => ({ x: Math.round(point.x), y: Math.round(point.y) }));
+
+  return {
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+    surfaces: normalized.surfaces.map((item) =>
+      item.id === surfaceId
+        ? {
+            ...item,
+            zones: item.zones.map((candidate) => (candidate.id === zoneId ? { ...candidate, shape: { type: 'polygon', points: nextPoints } } : candidate)),
+          }
+        : item,
+    ),
+  };
+}
+
+export function updateZoneName(project: TileProject, surfaceId: string, zoneId: string, name: string): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const surface = normalized.surfaces.find((item) => item.id === surfaceId);
+  const zoneIndex = surface?.zones.findIndex((zone) => zone.id === zoneId) ?? -1;
+  if (!surface || zoneIndex <= 0) return normalized;
+  const nextName = name.replace(/[\r\n\t]/g, ' ').slice(0, 60);
+
+  return {
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+    surfaces: normalized.surfaces.map((item) =>
+      item.id === surfaceId
+        ? {
+            ...item,
+            zones: item.zones.map((zone) => (zone.id === zoneId ? { ...zone, name: nextName } : zone)),
+          }
+        : item,
     ),
   };
 }
@@ -577,11 +648,11 @@ export function connectRoomOpenings(project: TileProject, sourceOpeningId: strin
   };
 }
 
-export function addOpening(project: TileProject, surfaceId: string, kind: Opening['kind']): TileProject {
-  return addOpeningDetailed(project, surfaceId, kind).project;
+export function addOpening(project: TileProject, surfaceId: string, kind: Opening['kind'], dimensions?: { widthMm: number; heightMm?: number }): TileProject {
+  return addOpeningDetailed(project, surfaceId, kind, dimensions).project;
 }
 
-export function addOpeningDetailed(project: TileProject, surfaceId: string, kind: Opening['kind']): { opening: Opening | null; project: TileProject } {
+export function addOpeningDetailed(project: TileProject, surfaceId: string, kind: Opening['kind'], dimensions?: { widthMm: number; heightMm?: number }): { opening: Opening | null; project: TileProject } {
   const normalized = ensureProjectDefaults(project);
   const surface = normalized.surfaces.find((item) => item.id === surfaceId && item.type === 'wall');
   if (!surface) return { opening: null, project: normalized };
@@ -589,7 +660,7 @@ export function addOpeningDetailed(project: TileProject, surfaceId: string, kind
   const areaId = getSurfaceAreaId(surface) ?? normalized.room.areas?.[0]?.id ?? 'room-1';
   const areaHeight = normalized.room.areas?.find((area) => area.id === areaId)?.heightMm ?? normalized.room.heightMm;
   const number = kind === 'window' ? undefined : Math.max(0, ...(normalized.room.openings ?? []).filter((item) => item.kind === kind).map((item) => item.number ?? 0)) + 1;
-  const opening = createCenteredOpening(surface.id, kind, surface.widthMm, areaHeight, number);
+  const opening = createCenteredOpening(surface.id, kind, surface.widthMm, areaHeight, number, dimensions);
   const room = normalizeRoomModel({
     ...normalized.room,
     openings: [...(normalized.room.openings ?? []), opening],
@@ -731,7 +802,7 @@ function updateOpening(project: TileProject, openingId: string, update: (opening
   };
 }
 
-export function addPartition(project: TileProject, start?: PointMm, end?: PointMm, areaId?: string): TileProject {
+export function addPartition(project: TileProject, start?: PointMm, end?: PointMm, areaId?: string, wallIndex?: number): TileProject {
   const normalized = ensureProjectDefaults(project);
   const room = normalizeRoomModel(normalized.room);
   const materialId = getPrimaryMaterial(normalized)?.id ?? null;
@@ -749,6 +820,7 @@ export function addPartition(project: TileProject, start?: PointMm, end?: PointM
     name: `Перегородка ${partitionIndex}`,
     start: partitionStart,
     end: partitionEnd,
+    wallIndex: wallIndex ?? findContourSegmentIndex(area?.contour ?? room.contour, partitionStart),
     thicknessMm: 100,
     heightMm: room.heightMm,
   };
@@ -808,7 +880,9 @@ export function renameRoomArea(project: TileProject, areaId: string, name: strin
 
 export interface RoomObjectInput {
   areaId: string;
-  excludeTile: boolean;
+  excludeFloorTile?: boolean;
+  excludeTile?: boolean;
+  excludeWallTile?: boolean;
   heightMm: number;
   lengthMm: number;
   name: string;
@@ -836,7 +910,9 @@ export function addRoomObject(project: TileProject, input: RoomObjectInput): Obj
   const object: RoomObject = {
     areaId: input.areaId,
     elevationMm: 0,
-    excludeTile: input.excludeTile,
+    excludeTile: (input.excludeFloorTile ?? input.excludeTile ?? false) && (input.excludeWallTile ?? input.excludeTile ?? false),
+    excludeFloorTile: input.excludeFloorTile ?? input.excludeTile ?? false,
+    excludeWallTile: input.excludeWallTile ?? input.excludeTile ?? false,
     heightMm: nextHeight,
     id: `room-object-${Date.now()}-${objectIndex}`,
     initialElevationMm: 0,
@@ -1037,6 +1113,15 @@ export function ensureProjectDefaults(project: TileProject): TileProject {
   const materials = normalizeMaterials(project.materials?.length ? project.materials : [material], settings);
   const primaryMaterial = materials[0] ?? material;
   const room = normalizeRoomModel(project.room);
+  const areas = room.areas ?? [];
+  const partitions = (room.partitions ?? []).map((partition) => {
+    const area = areas.find((item) => item.id === partition.areaId) ?? areas[0];
+    return {
+      ...partition,
+      wallIndex: partition.wallIndex ?? findContourSegmentIndex(area?.contour ?? room.contour, partition.start),
+    };
+  });
+  const hydratedRoom = partitions === room.partitions ? room : normalizeRoomModel({ ...room, partitions });
   return {
     ...project,
     objects: (project.objects ?? []).map((object) => {
@@ -1045,16 +1130,18 @@ export function ensureProjectDefaults(project: TileProject): TileProject {
       return {
         ...object,
         elevationMm: object.elevationMm ?? 0,
-        excludeTile: object.excludeTile ?? false,
+        excludeTile: object.excludeTile ?? ((object.excludeFloorTile ?? false) && (object.excludeWallTile ?? false)),
+        excludeFloorTile: object.excludeFloorTile ?? object.excludeTile ?? false,
+        excludeWallTile: object.excludeWallTile ?? object.excludeTile ?? false,
         initialElevationMm: object.initialElevationMm ?? 0,
         name: object.name || (legacy.kind ? legacyNames[legacy.kind] : 'Объект'),
         widthMm: object.widthMm ?? legacy.depthMm ?? 500,
       };
     }),
-    room,
+    room: hydratedRoom,
     settings,
     materials,
-    surfaces: mergeSurfaceAssignments(createSurfacesFromRoom(room, primaryMaterial.id, settings), project.surfaces, materials, primaryMaterial.id),
+    surfaces: mergeSurfaceAssignments(createSurfacesFromRoom(hydratedRoom, primaryMaterial.id, settings), project.surfaces, materials, primaryMaterial.id),
   };
 }
 
@@ -1363,9 +1450,13 @@ function distanceToSegment(point: PointMm, start: PointMm, end: PointMm): number
   return Math.hypot(point.x - (start.x + ratio * dx), point.y - (start.y + ratio * dy));
 }
 
-function createCenteredOpening(surfaceId: string, kind: Opening['kind'], surfaceWidthMm: number, roomHeightMm: number, number?: number): Opening {
-  const widthMm = kind === 'door' ? DEFAULT_DOOR_WIDTH_MM : kind === 'window' ? DEFAULT_WINDOW_SIZE_MM : DEFAULT_PASSAGE_WIDTH_MM;
-  const heightMm = kind === 'door' ? Math.min(DEFAULT_DOOR_HEIGHT_MM, roomHeightMm) : kind === 'window' ? Math.min(DEFAULT_WINDOW_SIZE_MM, roomHeightMm) : roomHeightMm;
+function createCenteredOpening(surfaceId: string, kind: Opening['kind'], surfaceWidthMm: number, roomHeightMm: number, number?: number, dimensions?: { widthMm: number; heightMm?: number }): Opening {
+  const defaultWidth = kind === 'door' ? DEFAULT_DOOR_WIDTH_MM : kind === 'window' ? DEFAULT_WINDOW_SIZE_MM : DEFAULT_PASSAGE_WIDTH_MM;
+  const requestedWidth = dimensions?.widthMm ?? defaultWidth;
+  const widthMm = Math.max(Math.min(MIN_OPENING_SIZE_MM, surfaceWidthMm), Math.min(Math.round(requestedWidth), surfaceWidthMm));
+  const defaultHeight = kind === 'door' ? DEFAULT_DOOR_HEIGHT_MM : kind === 'window' ? DEFAULT_WINDOW_SIZE_MM : roomHeightMm;
+  const requestedHeight = dimensions?.heightMm ?? defaultHeight;
+  const heightMm = kind === 'passage' ? roomHeightMm : Math.max(Math.min(MIN_OPENING_SIZE_MM, roomHeightMm), Math.min(Math.round(requestedHeight), roomHeightMm));
   const xMm = Math.max(0, Math.round((surfaceWidthMm - widthMm) / 2));
   const yMm = kind === 'window' ? Math.max(0, Math.round((roomHeightMm - heightMm) / 2)) : Math.max(0, roomHeightMm - heightMm);
   return {
@@ -1378,9 +1469,19 @@ function createCenteredOpening(surfaceId: string, kind: Opening['kind'], surface
     surfaceId,
     xMm,
     yMm,
-    widthMm: Math.min(surfaceWidthMm, widthMm),
+    widthMm,
     heightMm,
   };
+}
+
+function findContourSegmentIndex(contour: PointMm[], point: PointMm): number {
+  const toleranceMm = 3;
+  return contour.findIndex((start, index) => {
+    const end = contour[(index + 1) % contour.length];
+    const length = segmentLength(start, end);
+    if (!length) return false;
+    return Math.abs(segmentLength(start, point) + segmentLength(point, end) - length) <= toleranceMm;
+  });
 }
 
 function appendZone(project: TileProject, surfaceId: string, zone: FinishZone): TileProject {

@@ -76,6 +76,7 @@ export interface FinishZone {
   materialId: string | null;
   layout: LayoutSettings;
   manualEdits: ManualTileEdit[];
+  relatedSurfaceIds?: string[];
 }
 
 export interface TileMaterial {
@@ -125,13 +126,17 @@ export interface Partition {
   name: string;
   start: PointMm;
   end: PointMm;
+  wallIndex?: number;
   thicknessMm: number;
   heightMm: number;
 }
 
 export interface RoomObject {
   areaId: string;
-  excludeTile: boolean;
+  /** Legacy flag kept for projects saved before wall/floor exclusions were split. */
+  excludeTile?: boolean;
+  excludeFloorTile: boolean;
+  excludeWallTile: boolean;
   heightMm: number;
   id: string;
   initialElevationMm: number;

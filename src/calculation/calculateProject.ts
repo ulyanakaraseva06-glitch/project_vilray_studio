@@ -146,7 +146,7 @@ function getBlockedRectsForZone(project: TileProject, zone: FinishZone, surface:
       heightMm: opening.heightMm,
     })));
     for (const object of project.objects) {
-      if (!object.excludeTile) continue;
+      if (!object.excludeWallTile) continue;
       const projection = getRoomObjectWallProjection(project, surface.id, object);
       if (!projection) continue;
       blockedRects.push({
@@ -168,7 +168,7 @@ function getBlockedRectsForZone(project: TileProject, zone: FinishZone, surface:
       ? getBoundingBox(zone.shape.points)
       : { minX: areaBox.minX + zone.shape.xMm, minY: areaBox.minY + zone.shape.yMm };
     for (const object of project.objects) {
-      if (!object.excludeTile || object.areaId !== area.id) continue;
+      if (!object.excludeFloorTile || object.areaId !== area.id) continue;
       blockedRects.push({
         type: 'rect',
         xMm: object.xMm - zoneOrigin.minX,

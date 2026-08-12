@@ -211,6 +211,11 @@ input {
   cursor: none !important;
 }
 
+.zone-drawing-active .konva-stage,
+.zone-drawing-active .konva-stage canvas {
+  cursor: crosshair !important;
+}
+
 .canvas-layer-controls,
 .canvas-toolbar,
 .drawing-controls,
@@ -242,6 +247,18 @@ input {
 
 .canvas-layer-controls input {
   accent-color: var(--primary);
+}
+
+.canvas-layer-controls select {
+  min-height: 28px;
+  max-width: 230px;
+  padding: 0 28px 0 9px;
+  color: var(--text-sec);
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
 }
 
 .canvas-toolbar {
@@ -1083,6 +1100,31 @@ input {
   gap: 10px;
 }
 
+.zone-surface-picker {
+  display: grid;
+  gap: 5px;
+  color: var(--text-sec);
+  font-size: 12px;
+}
+
+.zone-surface-picker select {
+  width: 100%;
+  min-height: 38px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--bg-white);
+  border: 1px solid var(--primary-mid);
+  border-radius: var(--radius-sm);
+}
+
+.zone-hint,
+.zone-contour-note {
+  margin: 0;
+  color: var(--text-sec);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .zone-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1106,9 +1148,86 @@ input {
   text-align: center;
   color: var(--primary-dark);
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 600;
   background: var(--primary-light);
   border-color: var(--primary-mid);
+}
+
+.zone-actions button.active {
+  color: #FFFFFF;
+  background: var(--primary);
+}
+
+.manual-zone-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  color: var(--text-sec);
+  background: var(--primary-light);
+  border: 1px solid var(--primary-mid);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+}
+
+.manual-zone-controls span {
+  grid-column: 1 / -1;
+}
+
+.manual-zone-controls button {
+  min-height: 30px;
+  padding: 0 8px;
+  color: #FFFFFF;
+  background: var(--primary);
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.manual-zone-controls button.secondary {
+  color: var(--text-sec);
+  background: #FFFFFF;
+  border-color: var(--border);
+}
+
+.zone-3d-preview {
+  position: relative;
+  min-height: 112px;
+  overflow: hidden;
+  background: linear-gradient(145deg, #FBF8FD, #EEE4F5);
+  border: 1px solid var(--primary-mid);
+  border-radius: var(--radius-sm);
+  perspective: 380px;
+}
+
+.zone-preview-floor,
+.zone-preview-wall {
+  position: absolute;
+  left: 50%;
+  top: 48%;
+  width: 124px;
+  height: 74px;
+  margin-left: -62px;
+  background: rgba(163, 133, 196, 0.28);
+  border: 2px solid #8A6AAE;
+  transform: rotateX(62deg) rotateZ(-35deg);
+}
+
+.zone-preview-wall {
+  top: 13px;
+  height: 68px;
+  background: rgba(139, 91, 177, 0.20);
+  transform: rotateY(-50deg) rotateZ(2deg);
+}
+
+.zone-3d-preview small {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  color: var(--text-sec);
+  font-size: 10px;
 }
 
 .zone-list {
@@ -1144,12 +1263,16 @@ input {
 
 .zone-editor label {
   display: grid;
-  grid-template-columns: 24px 1fr;
-  align-items: center;
-  gap: 6px;
+  gap: 4px;
   color: var(--text-sec);
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 600;
+}
+
+.zone-editor .zone-name-field,
+.zone-contour-note,
+.zone-tile-button {
+  grid-column: 1 / -1;
 }
 
 .zone-editor input {
@@ -1173,6 +1296,16 @@ input {
   color: var(--text);
   background: var(--bg-white);
   border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.zone-tile-button {
+  min-height: 36px;
+  padding: 7px 10px;
+  color: var(--primary-dark);
+  background: var(--primary-light);
+  border: 1px solid var(--primary-mid);
   border-radius: var(--radius-sm);
   cursor: pointer;
 }
@@ -1663,19 +1796,48 @@ input {
 }
 
 .object-room-list article {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px;
+  padding: 5px 6px;
   background: var(--bg-white);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  cursor: pointer;
 }
 
 .object-room-list article:hover {
   border-color: var(--primary);
+}
+
+.object-room-list article.selected {
+  background: var(--primary-light);
+  border-color: var(--primary);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.object-name-button {
+  min-width: 0;
+  padding: 3px 4px;
+  overflow: hidden;
+  color: var(--text);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.object-card-info {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 2px;
+  padding: 6px 4px 2px;
+  border-top: 1px solid var(--border);
 }
 
 .object-room-list article > div:first-child {
@@ -1709,11 +1871,40 @@ input {
 }
 
 .object-list-actions button {
-  min-height: 30px;
-  padding: 0 8px;
+  width: 27px;
+  min-height: 27px;
+  padding: 0;
   color: var(--primary-dark);
   background: var(--bg-white);
   border-color: var(--primary-mid);
+}
+
+.opening-size-dialog {
+  display: grid;
+  gap: 14px;
+}
+
+.opening-size-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.opening-size-fields label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-sec);
+  font-size: 12px;
+}
+
+.opening-size-fields input {
+  min-height: 40px;
+  padding: 0 10px;
+  color: var(--text);
+  background: var(--bg-white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
 }
 
 .object-list-actions button.danger-lite {

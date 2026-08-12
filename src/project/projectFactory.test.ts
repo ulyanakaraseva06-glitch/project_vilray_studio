@@ -5,6 +5,7 @@ import {
   addRoomFromTemplate,
   addRoomFromContour,
   addFloorZone,
+  addManualZone,
   addOpening,
   addOpeningDetailed,
   addPartition,
@@ -41,6 +42,7 @@ import {
   updateSurfaceTileMaterial,
   updateZoneLayoutOffset,
   updateZoneLayoutPattern,
+  updateZoneName,
   updateZoneShape,
   updateZoneTileMaterial,
 } from './projectFactory';
@@ -192,6 +194,32 @@ describe('project factory', () => {
     const shape = updated.surfaces.find((surface) => surface.id === 'surface-floor')!.zones[1]!.shape;
 
     expect(shape).toMatchObject({ heightMm: 100, widthMm: 1700, xMm: 0, yMm: 0 });
+  });
+
+  it('renames an additional zone without changing the base zone', () => {
+    const project = addFloorZone(createProjectFromTemplate(templates[0], [1700, 2000]), 'rect');
+    const floor = project.surfaces.find((surface) => surface.id === 'surface-floor')!;
+    const updated = updateZoneName(project, floor.id, floor.zones[1]!.id, 'Акцент у ванны');
+
+    expect(updated.surfaces.find((surface) => surface.id === floor.id)?.zones[1]?.name).toBe('Акцент у ванны');
+    expect(updateZoneName(updated, floor.id, floor.zones[0]!.id, 'Нельзя')).toEqual(updated);
+  });
+
+  it('adds a preset zone to the selected additional floor', () => {
+    const project = addAdjacentRoom(createProjectFromTemplate(templates[0], [1700, 2000]));
+    const updated = addFloorZone(project, 'rect', 'surface-floor-room-2');
+
+    expect(updated.surfaces.find((surface) => surface.id === 'surface-floor')?.zones).toHaveLength(1);
+    expect(updated.surfaces.find((surface) => surface.id === 'surface-floor-room-2')?.zones).toHaveLength(2);
+  });
+
+  it('stores manually drawn floor and wall rectangles', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const floorResult = addManualZone(project, 'surface-floor', [{ x: 100, y: 100 }, { x: 900, y: 100 }, { x: 700, y: 800 }]);
+    const wallResult = addManualZone(floorResult.project, 'surface-wall-1', [{ x: 250, y: 300 }, { x: 1250, y: 1700 }]);
+
+    expect(floorResult.zone?.shape).toMatchObject({ type: 'rect', xMm: 100, yMm: 100, widthMm: 800, heightMm: 700 });
+    expect(wallResult.zone?.shape).toMatchObject({ type: 'rect', xMm: 250, yMm: 300, widthMm: 1000, heightMm: 1400 });
   });
 
   it('does not delete base zones but deletes extra zones', () => {
