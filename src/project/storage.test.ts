@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { templates } from '../config/appConfig';
 import { createProjectFromTemplate } from './projectFactory';
-import { clearProject, loadProject, saveProject } from './storage';
+import { clearProject, loadProject, parseProjectFile, saveProject, serializeProjectFile } from './storage';
 
 class MemoryStorage implements Storage {
   private data = new Map<string, string>();
@@ -33,5 +33,13 @@ describe('project storage', () => {
     expect(loadProject(storage)?.id).toBe(project.id);
     clearProject(storage);
     expect(loadProject(storage)).toBeNull();
+  });
+
+  it('round-trips a project through the .vilray file format', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const restored = parseProjectFile(serializeProjectFile(project));
+
+    expect(restored).toEqual(project);
+    expect(parseProjectFile('{"format":"other"}')).toBeNull();
   });
 });

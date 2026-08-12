@@ -5,6 +5,7 @@ import {
   ArrowRight,
   ArrowUp,
   Calculator,
+  FolderOpen,
   Grid3X3,
   HelpCircle,
   Maximize2,
@@ -30,6 +31,7 @@ import {
   addWallZone,
   createProjectFromTemplate,
   connectRoomOpenings,
+  confirmRoomAreaDimensions,
   constrainRoomObjectPosition,
   deleteOpening,
   deletePartition,
@@ -69,13 +71,13 @@ import {
   updateZonePolygonPoints,
   updateZoneShape,
   updateZoneTileMaterial,
+  updateZoneTileColor,
   type ZonePresetKind,
   type OpeningConnectionCandidate,
 } from '../project/projectFactory';
 import { generatePolygonLayout, generateRectLayout, type LayoutEdgeCuts } from '../layout/layoutEngine';
 import { calculateProject } from '../calculation/calculateProject';
-import { exportProjectPdf } from '../export/projectPdf';
-import { clearProject, loadProject, saveProject } from '../project/storage';
+import { clearProject, loadProject, parseProjectFile, saveProject, serializeProjectFile } from '../project/storage';
 import { getBoundingBox, moveWall, segmentLength, validateContour } from '../project/geometry';
 import {
   buildClosedContour,
@@ -113,7 +115,14 @@ type TilePanelSection = 'format' | 'laying' | 'origin' | 'movement';
 type CustomDrawingTarget = 'primary' | 'additional';
 type MeasurementMode = 'room' | 'tile' | 'objects';
 
-type ConfirmAction = { type: 'reset' } | { type: 'template'; templateId: string } | null;
+type ConfirmAction =
+  | { type: 'reset' }
+  | { type: 'template'; templateId: string }
+  | { type: 'delete-opening'; id: string }
+  | { type: 'delete-partition'; id: string }
+  | { type: 'delete-object'; id: string }
+  | { type: 'delete-zone'; surfaceId: string; zoneId: string }
+  | null;
 
 type InlineEdit = {
   left: number;
@@ -128,6 +137,8 @@ const tilePresets = getVisibleTilePresets();
 const initialCanvasSize = { width: 1120, height: 760 };
 const PLAN_OFFSET_X = 170;
 const PLAN_OFFSET_Y = 118;
+const primaryPastelColors = ['#F2D7D9', '#F6E3C5', '#DDEBD4', '#D5E6F3', '#E5D8F1'];
+const extendedPastelColors = ['#F3CED8', '#F5D8C4', '#F5EDC9', '#D9EBCF', '#CDE9DE', '#CEE8EE', '#CFDDF2', '#D8D2F1', '#E8D2EE', '#F1D4E2', '#E4DDD5', '#D9DEE2'];
 
 function loadInitialAppState() {
   const savedProject = loadProject();
@@ -151,6 +162,7 @@ export function App() {
   const [activePanelTab, setActivePanelTab] = useState<PanelTab>('room');
   const [layoutDragEnabled, setLayoutDragEnabled] = useState(false);
   const [calculationOpen, setCalculationOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<EditTarget>(null);
   const [layers, setLayers] = useState<CanvasLayers>({ grid: true, floor: true, walls: true, dimensions: true });
   const [viewport, setViewport] = useState<CanvasViewport>(resetViewport());
@@ -177,9 +189,13 @@ export function App() {
   const [editingObjectId, setEditingObjectId] = useState<string | null>(null);
   const [renameRoomAreaId, setRenameRoomAreaId] = useState<string | null>(null);
   const [openingDialogKind, setOpeningDialogKind] = useState<Opening['kind'] | null>(null);
+  const [openingDialogSurfaceId, setOpeningDialogSurfaceId] = useState<string | null>(null);
   const [manualZoneSurfaceId, setManualZoneSurfaceId] = useState<string | null>(null);
   const [manualZonePoints, setManualZonePoints] = useState<PointMm[]>([]);
+  const [roomDimensionsAreaId, setRoomDimensionsAreaId] = useState<string | null>(null);
+  const [roomDimensionsError, setRoomDimensionsError] = useState<string | null>(null);
   const historyRef = useRef<{ applying: boolean; current: TileProject; future: TileProject[]; past: TileProject[] }>({ applying: false, current: initialAppState.project, future: [], past: [] });
+  const projectFileInputRef = useRef<HTMLInputElement>(null);
   const [, setHistoryRevision] = useState(0);
   const contourStatus = validateContour(project.room.contour);
   const primaryMaterial = project.materials[0];
@@ -189,6 +205,7 @@ export function App() {
   const activeZoneId = activeZone?.id ?? null;
   const activeTileMaterial = activeSurfaceId && activeZoneId ? getZoneMaterial(project, activeSurfaceId, activeZoneId) : activeSurfaceId ? getSurfaceMaterial(project, activeSurfaceId) : primaryMaterial;
   const calculation = useMemo(() => calculateProject(project), [project]);
+  const openingDialogSurface = openingDialogSurfaceId ? project.surfaces.find((surface) => surface.id === openingDialogSurfaceId && surface.type === 'wall') : null;
 
   useEffect(() => {
     const history = historyRef.current;
@@ -275,8 +292,12 @@ export function App() {
     setViewport(resetViewport());
     setHasRoomEdits(false);
     setTemplatePickerOpen(false);
-    setActivePanelTab('tile');
-    setProject((current) => createProjectFromTemplate(template, getPreferredTemplateSize(template), current));
+    setActivePanelTab('room');
+    const nextProject = createProjectFromTemplate(template, getPreferredTemplateSize(template), project);
+    setProject(nextProject);
+    setRoomDimensionsAreaId(nextProject.room.areas?.[0]?.id ?? 'room-1');
+    setRoomDimensionsError(null);
+    setLayers({ grid: true, floor: true, walls: false, dimensions: true });
   }
 
   function beginCustomDrawing(target: CustomDrawingTarget) {
@@ -609,7 +630,11 @@ export function App() {
     if (!template) return;
     const nextAreaId = `room-${(project.room.areas?.length ?? 1) + 1}`;
     setHasRoomEdits(true);
-    setProject((current) => addRoomFromTemplate(current, template, getPreferredTemplateSize(template)));
+    const nextProject = addRoomFromTemplate(project, template, getPreferredTemplateSize(template));
+    setProject(nextProject);
+    setRoomDimensionsAreaId(nextAreaId);
+    setRoomDimensionsError(null);
+    setLayers({ grid: true, floor: true, walls: false, dimensions: true });
     selectSurface(`surface-floor-${nextAreaId}`);
     setActivePanelTab('room');
   }
@@ -623,11 +648,11 @@ export function App() {
     });
   }
 
-  function addSurfaceOpening(kind: Opening['kind'], dimensions: { widthMm: number; heightMm?: number }) {
-    if (!activeSurfaceId) return;
+  function addSurfaceOpening(kind: Opening['kind'], dimensions: { widthMm: number; heightMm?: number }, surfaceId = activeSurfaceId) {
+    if (!surfaceId) return;
     setHasRoomEdits(true);
     setProject((current) => {
-      const added = addOpeningDetailed(current, activeSurfaceId, kind, dimensions);
+      const added = addOpeningDetailed(current, surfaceId, kind, dimensions);
       if (!added.opening || added.opening.kind === 'window') return added.project;
       const candidates = getOpeningConnectionCandidates(added.project, added.opening.id);
       if (!candidates.length) return added.project;
@@ -667,9 +692,7 @@ export function App() {
   }
 
   function deleteSurfaceOpening(openingId: string) {
-    setHasRoomEdits(true);
-    setProject((current) => deleteOpening(current, openingId));
-    setSelectedOpeningId(null);
+    setConfirmAction({ type: 'delete-opening', id: openingId });
   }
 
   function createPartition() {
@@ -734,9 +757,7 @@ export function App() {
   }
 
   function deleteSurfacePartition(partitionId: string) {
-    setHasRoomEdits(true);
-    setProject((current) => deletePartition(current, partitionId));
-    setSelectedPartitionId(null);
+    setConfirmAction({ type: 'delete-partition', id: partitionId });
   }
 
   function submitRoomObject(input: Parameters<typeof addRoomObject>[1]) {
@@ -771,9 +792,7 @@ export function App() {
   }
 
   function deleteSurfaceObject(objectId: string) {
-    setProject((current) => deleteRoomObject(current, objectId));
-    setSelectedObjectId(null);
-    setHasRoomEdits(true);
+    setConfirmAction({ type: 'delete-object', id: objectId });
   }
 
   function changeRoomAreaName(areaId: string, name: string) {
@@ -783,7 +802,8 @@ export function App() {
   }
 
   function createZone(kind: ZonePresetKind) {
-    const targetSurfaceId = activeSurfaceId && project.surfaces.some((surface) => surface.id === activeSurfaceId) ? activeSurfaceId : 'surface-floor';
+    const targetSurfaceId = activeSurfaceId && project.surfaces.some((surface) => surface.id === activeSurfaceId) ? activeSurfaceId : null;
+    if (!targetSurfaceId) return;
     const targetSurface = project.surfaces.find((surface) => surface.id === targetSurfaceId);
     if (!targetSurface) return;
     setHasRoomEdits(true);
@@ -791,7 +811,7 @@ export function App() {
     setProject((current) => {
       const next =
         targetSurface.type === 'wall'
-          ? addWallZone(current, targetSurface.id, kind === 'shower' ? 'rect' : kind)
+          ? addWallZone(current, targetSurface.id, kind)
           : addFloorZone(current, kind, targetSurface.id);
       const surface = next.surfaces.find((item) => item.id === targetSurface.id);
       const zone = surface?.zones[surface.zones.length - 1] ?? null;
@@ -814,44 +834,82 @@ export function App() {
     setProject((current) => updateZonePolygonPoints(current, surfaceId, zoneId, points));
   }
 
-  function changeActiveZoneShape(patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) {
+  function saveZoneDetails(surfaceId: string, zoneId: string, name: string, shape: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) {
+    setHasRoomEdits(true);
+    setProject((current) => updateZoneShape(updateZoneName(current, surfaceId, zoneId, name), surfaceId, zoneId, shape));
+  }
+
+  function deleteActiveZone(surfaceId = activeSurfaceId, zoneId = selectedZoneId) {
+    if (!surfaceId || !zoneId) return;
+    setConfirmAction({ type: 'delete-zone', surfaceId, zoneId });
+  }
+
+  function saveRoomDimensions(areaId: string) {
+    const area = project.room.areas?.find((item) => item.id === areaId);
+    if (!area) return;
+    const lengthsMm = area.contour.map((point, index) => Math.round(segmentLength(point, area.contour[(index + 1) % area.contour.length])));
+    const result = confirmRoomAreaDimensions(project, areaId, lengthsMm);
+    if (result.error) { setRoomDimensionsError(result.error); return; }
+    setProject(result.project);
+    setRoomDimensionsAreaId(null);
+    setRoomDimensionsError(null);
+    setLayers((current) => ({ ...current, floor: true, walls: true, dimensions: true }));
+    setHasRoomEdits(true);
+  }
+
+  function requestOpening(kind: Opening['kind']) {
+    if (!activeSurface || activeSurface.type !== 'wall') {
+      setRoomActionMessage('Сначала выберите стену, на которой нужно разместить элемент.');
+      return;
+    }
+    setOpeningDialogSurfaceId(activeSurface.id);
+    setOpeningDialogKind(kind);
+  }
+
+  function closeOpeningDialog() {
+    setOpeningDialogKind(null);
+    setOpeningDialogSurfaceId(null);
+  }
+
+  function applyTileColor(color: string) {
     if (!activeSurfaceId || !activeZoneId) return;
-    changeZoneShape(activeSurfaceId, activeZoneId, patch);
-  }
-
-  function changeActiveZoneName(name: string) {
-    if (!activeSurfaceId || !selectedZoneId) return;
     setHasRoomEdits(true);
-    setProject((current) => updateZoneName(current, activeSurfaceId, selectedZoneId, name));
+    setProject((current) => updateZoneTileColor(current, activeSurfaceId, activeZoneId, color));
   }
 
-  function selectZoneSurface(surfaceId: string) {
-    const surface = project.surfaces.find((item) => item.id === surfaceId);
-    if (!surface) return;
-    cancelManualZone();
-    selectZone(surface.id, null);
-    setLayers((current) => ({
-      ...current,
-      floor: surface.type === 'floor' ? true : current.floor,
-      walls: surface.type === 'wall' ? true : current.walls,
-    }));
+  function downloadProjectFile() {
+    const blob = new Blob([serializeProjectFile(project)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${project.name.trim().replace(/[\\/:*?"<>|]+/g, '-') || 'Проект Vilray'}.vilray`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
-  function openActiveZoneTileSettings() {
-    if (!activeSurfaceId || !selectedZoneId) return;
-    setActivePanelTab('tile');
-    setOpenTileSection('format');
-  }
-
-  function deleteActiveZone() {
-    if (!activeSurfaceId || !selectedZoneId) return;
+  async function openProjectFile(file: File) {
+    const loaded = parseProjectFile(await file.text());
+    if (!loaded) {
+      setRoomActionMessage('Не удалось открыть файл. Выберите корректный проект с расширением .vilray.');
+      return;
+    }
+    const nextProject = ensureProjectDefaults(loaded);
+    setProject(nextProject);
+    historyRef.current = { applying: true, current: nextProject, future: [], past: [] };
+    setSelectedTemplateId(nextProject.room.templateId ?? 'custom');
+    selectSurface(null);
+    setRoomDimensionsAreaId(null);
+    setEditTarget(null);
+    setDrawingMode('idle');
+    setLayers({ grid: true, floor: true, walls: true, dimensions: true });
+    setViewport(resetViewport());
+    setTemplatePickerOpen(false);
     setHasRoomEdits(true);
-    setProject((current) => deleteZone(current, activeSurfaceId, selectedZoneId));
-    setSelectedZoneId(null);
+    setRoomActionMessage('Проект открыт. Можно продолжать работу.');
   }
 
   function startManualZone() {
-    const surface = activeSurface ?? project.surfaces.find((item) => item.type === 'floor');
+    const surface = activeSurface;
     if (!surface) return;
     setManualZoneSurfaceId(surface.id);
     setManualZonePoints([]);
@@ -961,7 +1019,13 @@ export function App() {
       resetProjectNow();
       return;
     }
-    applyTemplateNow(action.templateId);
+    if (action.type === 'template') { applyTemplateNow(action.templateId); return; }
+    setHasRoomEdits(true);
+    if (action.type === 'delete-opening') { setProject((current) => deleteOpening(current, action.id)); setSelectedOpeningId(null); return; }
+    if (action.type === 'delete-partition') { setProject((current) => deletePartition(current, action.id)); setSelectedPartitionId(null); return; }
+    if (action.type === 'delete-object') { setProject((current) => deleteRoomObject(current, action.id)); setSelectedObjectId(null); return; }
+    setProject((current) => deleteZone(current, action.surfaceId, action.zoneId));
+    setSelectedZoneId(null);
   }
 
   const confirmDialog = getConfirmDialogCopy(confirmAction);
@@ -981,7 +1045,7 @@ export function App() {
             <Grid3X3 size={17} />
             Сетка
           </button>
-          <button type="button" className="tool-button" onClick={() => exportProjectPdf(project, calculation)}>
+          <button type="button" className="tool-button" onClick={() => setHelpOpen(true)}>
             <HelpCircle size={17} />
             Помощь
           </button>
@@ -991,14 +1055,19 @@ export function App() {
           </button>
         </div>
         <div className="topbar-actions">
-          <button type="button" className="tool-button">
-            <Save size={17} />
-            Сохранить
-          </button>
           <button type="button" className="primary-button" onClick={() => setCalculationOpen(true)}>
             <Calculator size={17} />
             Расчёт
           </button>
+          <button type="button" className="tool-button" onClick={downloadProjectFile}>
+            <Save size={17} />
+            Сохранить
+          </button>
+          <button type="button" className="tool-button" onClick={() => projectFileInputRef.current?.click()}>
+            <FolderOpen size={17} />
+            Открыть
+          </button>
+          <input ref={projectFileInputRef} className="visually-hidden" type="file" accept=".vilray,application/json" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) void openProjectFile(file); event.currentTarget.value = ''; }} />
         </div>
       </header>
 
@@ -1011,6 +1080,8 @@ export function App() {
             drawingError={drawingError}
             drawingMode={drawingMode}
             drawingToolArmed={drawingToolArmed}
+            dimensionEntryAreaId={roomDimensionsAreaId}
+            dimensionEntryError={roomDimensionsError}
             customDrawingMode={customDrawingMode}
             editTarget={editTarget}
             layers={layers}
@@ -1043,6 +1114,7 @@ export function App() {
             onMoveDraftReviewPoint={moveDraftReviewPoint}
             onMoveDraftReviewWall={moveDraftReviewWall}
             onMoveLastDraftPoint={moveLastDraftPoint}
+            onSaveRoomDimensions={() => roomDimensionsAreaId && saveRoomDimensions(roomDimensionsAreaId)}
             onSaveDrawing={saveCustomDrawing}
             onSelectSurface={selectSurface}
             onSelectOpening={selectOpening}
@@ -1068,6 +1140,9 @@ export function App() {
             onSelectPartition={setSelectedPartitionId}
             selectedZoneId={selectedZoneId}
             selectedWallIndex={selectedWallIndex}
+            activeTileColor={activeTileMaterial?.swatch.type === 'color' ? activeTileMaterial.swatch.value : '#F2EBF9'}
+            canColorTile={Boolean(activeSurfaceId && activeZoneId)}
+            onTileColorChange={applyTileColor}
             viewport={viewport}
           />
           {roomActionMessage ? <div className="room-action-message" role="status">{roomActionMessage}</div> : null}
@@ -1147,10 +1222,10 @@ export function App() {
               <TemplateGrid onSelect={applyTemplate} selectedTemplateId={selectedTemplateId} />
               <RoomTools
                 activeSurface={activeSurface}
-                onAddDoor={() => setOpeningDialogKind('door')}
-                onAddPassage={() => setOpeningDialogKind('passage')}
+                onAddDoor={() => requestOpening('door')}
+                onAddPassage={() => requestOpening('passage')}
                 onAddPartition={createPartition}
-                onAddWindow={() => setOpeningDialogKind('window')}
+                onAddWindow={() => requestOpening('window')}
                 partitionDrawingActive={partitionDrawingActive}
                 onAddRoom={addRoom}
                 project={project}
@@ -1177,11 +1252,8 @@ export function App() {
               activeZone={activeZone}
               onCreateZone={createZone}
               onDeleteZone={deleteActiveZone}
-              onEditTile={openActiveZoneTileSettings}
-              onRenameZone={changeActiveZoneName}
+              onSaveZone={saveZoneDetails}
               onSelectZone={selectZone}
-              onSelectZoneSurface={selectZoneSurface}
-              onZoneShapeChange={changeActiveZoneShape}
               manualDrawingActive={Boolean(manualZoneSurfaceId)}
               manualPointCount={manualZonePoints.length}
               onCancelManualZone={cancelManualZone}
@@ -1216,15 +1288,15 @@ export function App() {
         />
       ) : null}
 
-      {openingDialogKind && activeSurface?.type === 'wall' ? (
+      {openingDialogKind && openingDialogSurface ? (
         <OpeningSizeDialog
           kind={openingDialogKind}
-          maxHeightMm={activeSurface.heightMm}
-          maxWidthMm={activeSurface.widthMm}
-          onCancel={() => setOpeningDialogKind(null)}
+          maxHeightMm={openingDialogSurface.heightMm}
+          maxWidthMm={openingDialogSurface.widthMm}
+          onCancel={closeOpeningDialog}
           onSubmit={(dimensions) => {
-            addSurfaceOpening(openingDialogKind, dimensions);
-            setOpeningDialogKind(null);
+            addSurfaceOpening(openingDialogKind, dimensions, openingDialogSurface.id);
+            closeOpeningDialog();
           }}
         />
       ) : null}
@@ -1248,6 +1320,8 @@ export function App() {
           onSubmit={changeRoomAreaName}
         />
       ) : null}
+
+      {helpOpen ? <HelpDialog onClose={() => setHelpOpen(false)} /> : null}
 
       {templatePickerOpen ? (
         <TemplatePickerDialog
@@ -1338,6 +1412,29 @@ function OpeningConnectionDialog({ candidates, onCancel, onSelect }: { candidate
         <div className="confirm-actions">
           <button type="button" className="confirm-cancel" onClick={onCancel}>Пока не соединять</button>
         </div>
+      </section>
+    </div>
+  );
+}
+
+function HelpDialog({ onClose }: { onClose: () => void }) {
+  const sections = [
+    ['Начало работы', 'Выберите готовую форму помещения или нарисуйте собственный контур. У готовой формы нажимайте на подписи стен, вводите размеры в миллиметрах и затем сохраните их.'],
+    ['Плитка', 'Выберите поверхность на схеме, затем задайте формат, укладку, точку старта, движение раскладки и цвет плитки.'],
+    ['Помещение', 'Добавляйте помещения, двери, проходы, окна и перегородки. Перед добавлением проёма обязательно выберите нужную стену.'],
+    ['Зоны', 'Выберите пол или стену, нарисуйте зону и назначьте ей отдельную плитку. Зоны можно переименовывать, изменять и удалять.'],
+    ['Объекты', 'Создавайте объекты с точными размерами и указывайте, должна ли отсутствовать плитка под объектом или за ним.'],
+    ['Размеры', 'Переключатель над схемой показывает размеры помещения, отступы плитки или расстояния между объектами. Значения появляются только у выбранного элемента.'],
+    ['Навигация', 'Сетка очищает выбор при клике по свободному месту. Кнопки «−», «+» и «Вписать» управляют масштабом. Стрелки вверху отменяют и возвращают до 10 действий.'],
+    ['Сохранение', 'Кнопка «Сохранить» скачивает файл .vilray. Кнопка «Открыть» загружает такой файл и восстанавливает проект для продолжения работы.'],
+    ['Расчёт', 'Кнопка «Расчёт» формирует сводку по плитке, количеству элементов и необходимому запасу.'],
+  ];
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="confirm-dialog help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title">
+        <header><div><h2 id="help-title">Руководство пользователя</h2><p>Краткая инструкция по основным возможностям редактора.</p></div><button type="button" aria-label="Закрыть" onClick={onClose}>×</button></header>
+        <div className="help-sections">{sections.map(([title, text], index) => <details key={title} open={index === 0}><summary>{title}</summary><p>{text}</p></details>)}</div>
+        <footer>Остались вопросы? Напишите нам: <a href="mailto:ulyana.karaseva.06@gmail.com">ulyana.karaseva.06@gmail.com</a></footer>
       </section>
     </div>
   );
@@ -1597,6 +1694,14 @@ function getConfirmDialogCopy(action: ConfirmAction) {
     };
   }
 
+  if (action.type.startsWith('delete-')) {
+    return {
+      confirmLabel: 'Да, удалить',
+      message: 'Вы уверены, что хотите удалить элемент?',
+      title: 'Удаление элемента',
+    };
+  }
+
   return {
     confirmLabel: 'Сменить форму',
     message: 'Текущие размеры и правки стен будут заменены выбранным шаблоном.',
@@ -1612,6 +1717,8 @@ interface WorkspaceCanvasProps {
   drawingError: string | null;
   drawingMode: DrawingMode;
   drawingToolArmed: boolean;
+  dimensionEntryAreaId: string | null;
+  dimensionEntryError: string | null;
   editTarget: EditTarget;
   layers: CanvasLayers;
   hideFloorOpenings: boolean;
@@ -1645,6 +1752,7 @@ interface WorkspaceCanvasProps {
   onMoveDraftReviewPoint: (index: number, point: PointMm) => boolean;
   onMoveDraftReviewWall: (index: number, deltaXmm: number, deltaYmm: number) => boolean;
   onMoveLastDraftPoint: (point: PointMm) => PointMm | null;
+  onSaveRoomDimensions: () => void;
   onSaveDrawing: () => void;
   onSelectSurface: (surfaceId: string | null) => void;
   onSelectOpening: (surfaceId: string, openingId: string) => void;
@@ -1660,6 +1768,9 @@ interface WorkspaceCanvasProps {
   onViewportChange: (viewport: CanvasViewport) => void;
   onZoneShapeChange: (surfaceId: string, zoneId: string, patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   onZonePolygonChange: (surfaceId: string, zoneId: string, points: PointMm[]) => void;
+  activeTileColor: string;
+  canColorTile: boolean;
+  onTileColorChange: (color: string) => void;
   project: TileProject;
   relatedZoneWallIds: string[];
   selectedSurfaceId: string | null;
@@ -1679,6 +1790,8 @@ function WorkspaceCanvas({
   drawingError,
   drawingMode,
   drawingToolArmed,
+  dimensionEntryAreaId,
+  dimensionEntryError,
   editTarget,
   layers,
   hideFloorOpenings,
@@ -1712,6 +1825,7 @@ function WorkspaceCanvas({
   onMoveDraftReviewPoint,
   onMoveDraftReviewWall,
   onMoveLastDraftPoint,
+  onSaveRoomDimensions,
   onSaveDrawing,
   onSelectSurface,
   onSelectOpening,
@@ -1727,6 +1841,9 @@ function WorkspaceCanvas({
   onViewportChange,
   onZoneShapeChange,
   onZonePolygonChange,
+  activeTileColor,
+  canColorTile,
+  onTileColorChange,
   project,
   relatedZoneWallIds,
   selectedSurfaceId,
@@ -1743,6 +1860,7 @@ function WorkspaceCanvas({
   const [draftPointer, setDraftPointer] = useState<PointMm | null>(null);
   const [collapsedWallAreaIds, setCollapsedWallAreaIds] = useState<Set<string>>(() => new Set());
   const [measurementMode, setMeasurementMode] = useState<MeasurementMode>('room');
+  const [customPaletteOpen, setCustomPaletteOpen] = useState(false);
   const panRef = useRef<{ active: boolean; x: number; y: number }>({ active: false, x: 0, y: 0 });
   const layoutDragRef = useRef<{ active: boolean; x: number; y: number }>({ active: false, x: 0, y: 0 });
   const planView = useMemo(() => getPlanView(project.room.contour), [project.room.contour]);
@@ -1802,7 +1920,7 @@ function WorkspaceCanvas({
       onAddPartitionDraftPoint(pointerToDraftPoint(pointer, viewport));
       return;
     }
-    if (selectedOpeningId) onSelectSurface(null);
+    if (event.target.name() === 'pan-bg') onSelectSurface(null);
     if (layoutDragEnabled && selectedSurfaceId) {
       const pointer = event.target.getStage()?.getPointerPosition();
       if (!pointer) return;
@@ -1940,7 +2058,8 @@ function WorkspaceCanvas({
             {drawingMode === 'custom-room-review' ? <DraftReviewLayer onPointMove={onMoveDraftReviewPoint} onWallMove={onMoveDraftReviewWall} points={draftContour} /> : null}
             {drawingMode === 'idle' && layers.floor ? (
               <FloorLayer
-                dimensionsVisible={layers.dimensions && measurementMode === 'room'}
+                dimensionEntryAreaId={dimensionEntryAreaId}
+                dimensionsVisible={layers.dimensions && measurementMode === 'room' && (Boolean(selectedSurfaceId) || Boolean(dimensionEntryAreaId))}
                 measurementMode={layers.dimensions ? measurementMode : null}
                 hideOpenings={hideFloorOpenings}
                 onEditSegment={onEditSegment}
@@ -1962,7 +2081,7 @@ function WorkspaceCanvas({
                 onZoneShapeChange={onZoneShapeChange}
                 onZonePolygonChange={onZonePolygonChange}
                 project={project}
-                roomMoveEnabled={!partitionDrawingActive && !selectedZoneId && !manualZoneSurfaceId}
+                roomMoveEnabled={!dimensionEntryAreaId && !partitionDrawingActive && !selectedZoneId && !manualZoneSurfaceId}
                 selectedSurfaceId={selectedSurfaceId}
                 selectedOpeningId={selectedOpeningId}
                 selectedObjectId={selectedObjectId}
@@ -1973,10 +2092,10 @@ function WorkspaceCanvas({
               />
             ) : null}
             {drawingMode === 'idle' && partitionDrawingActive ? <PartitionDraftLayer end={partitionDraftStart ? draftPointer : null} start={partitionDraftStart} view={planView} /> : null}
-            {drawingMode === 'idle' && layers.walls ? (
+            {drawingMode === 'idle' && layers.walls && !dimensionEntryAreaId ? (
               <WallsLayer
-                dimensionsVisible={layers.dimensions && measurementMode === 'room'}
-                tileOffsetsVisible={layers.dimensions && measurementMode === 'tile'}
+                dimensionsVisible={layers.dimensions && measurementMode === 'room' && Boolean(selectedSurfaceId)}
+                tileOffsetsVisible={layers.dimensions && measurementMode === 'tile' && Boolean(selectedSurfaceId)}
                 frames={wallFrames}
                 sections={wallLayout.sections}
                 onChangeHeight={onChangeHeight}
@@ -2059,6 +2178,15 @@ function WorkspaceCanvas({
           <Maximize2 size={16} />
         </button>
       </div>
+
+      <TileColorPicker activeColor={activeTileColor} canApply={canColorTile} customOpen={customPaletteOpen} onCustomToggle={() => setCustomPaletteOpen((current) => !current)} onSelect={onTileColorChange} />
+
+      {dimensionEntryAreaId ? (
+        <div className="room-dimension-controls">
+          <div><strong>Размеры готового помещения</strong><span>Нажмите на число у стены, введите длину в миллиметрах и подтвердите каждое изменение.</span>{dimensionEntryError ? <em>{dimensionEntryError}</em> : null}</div>
+          <button type="button" onClick={onSaveRoomDimensions}>Сохранить размеры</button>
+        </div>
+      ) : null}
 
       {drawingMode === 'custom-room' ? (
         <div className="drawing-controls">
@@ -2461,6 +2589,20 @@ function DraftLengthLabel({ error = false, text, x, y }: { error?: boolean; text
   );
 }
 
+function TileColorPicker({ activeColor, canApply, customOpen, onCustomToggle, onSelect }: { activeColor: string; canApply: boolean; customOpen: boolean; onCustomToggle: () => void; onSelect: (color: string) => void }) {
+  return (
+    <div className="tile-color-picker">
+      <span>Цвет плитки</span>
+      <div className="tile-color-row">
+        {primaryPastelColors.map((color) => <button key={color} type="button" disabled={!canApply} className={activeColor.toUpperCase() === color ? 'active' : ''} style={{ background: color }} aria-label={`Цвет ${color}`} onClick={() => onSelect(color)} />)}
+        <button type="button" className="custom-color-button" disabled={!canApply} aria-expanded={customOpen} onClick={onCustomToggle}>Свой</button>
+      </div>
+      {customOpen ? <div className="extended-pastel-palette">{extendedPastelColors.map((color) => <button key={color} type="button" className={activeColor.toUpperCase() === color ? 'active' : ''} style={{ background: color }} aria-label={`Свой цвет ${color}`} onClick={() => onSelect(color)} />)}</div> : null}
+      {!canApply ? <small>Выберите пол, стену или зону</small> : null}
+    </div>
+  );
+}
+
 type MeasurementBounds = ReturnType<typeof getBoundingBox>;
 
 function ZoneBoundsMeasurements({ bounds, surfaceBounds, toCanvas }: { bounds: MeasurementBounds; surfaceBounds: MeasurementBounds; toCanvas: (point: PointMm) => PointMm }) {
@@ -2505,6 +2647,10 @@ function ZoneMeasurementLabel({ text, width = 68, x, y }: { text: string; width?
       <Text x={-width / 2 + 2} y={-6} width={width - 4} align="center" text={text} fill="#6F4F93" fontSize={10} />
     </Group>
   );
+}
+
+function ZoneSizeMeasurement({ heightMm, widthMm, x, y }: { heightMm: number; widthMm: number; x: number; y: number }) {
+  return <ZoneMeasurementLabel width={104} x={x} y={y} text={`${Math.round(widthMm)} × ${Math.round(heightMm)} мм`} />;
 }
 
 function PolygonSideMeasurements({ closed, points, toCanvas }: { closed: boolean; points: PointMm[]; toCanvas: (point: PointMm) => PointMm }) {
@@ -2574,6 +2720,7 @@ function pointToCanvasPoint(point: PointMm) {
 }
 
 interface FloorLayerProps {
+  dimensionEntryAreaId: string | null;
   dimensionsVisible: boolean;
   hideOpenings: boolean;
   measurementMode: MeasurementMode | null;
@@ -2606,7 +2753,7 @@ interface FloorLayerProps {
   view: PlanViewTransform;
 }
 
-function FloorLayer({ dimensionsVisible, hideOpenings, measurementMode, onDeleteObject, onDeletePartition, onEditObject, onEditSegment, onEditLayoutOffset, onMoveObject, onMovePartition, onMoveRoomArea, onMoveWall, onResetPartition, onSelectObject, onSelectOpening, onSelectPartition, onSelectSurface, onSelectZone, onSelectWall, onZonePolygonChange, onZoneShapeChange, project, roomMoveEnabled, selectedObjectId, selectedOpeningId, selectedPartitionId, selectedSurfaceId, selectedZoneId, selectedWallIndex, view }: FloorLayerProps) {
+function FloorLayer({ dimensionEntryAreaId, dimensionsVisible, hideOpenings, measurementMode, onDeleteObject, onDeletePartition, onEditObject, onEditSegment, onEditLayoutOffset, onMoveObject, onMovePartition, onMoveRoomArea, onMoveWall, onResetPartition, onSelectObject, onSelectOpening, onSelectPartition, onSelectSurface, onSelectZone, onSelectWall, onZonePolygonChange, onZoneShapeChange, project, roomMoveEnabled, selectedObjectId, selectedOpeningId, selectedPartitionId, selectedSurfaceId, selectedZoneId, selectedWallIndex, view }: FloorLayerProps) {
   const areas = project.room.areas ?? [{ id: 'room-1', name: 'Помещение 1', contour: project.room.contour, heightMm: project.room.heightMm }];
   const wallSurfaces = project.surfaces.filter((surface) => surface.type === 'wall');
 
@@ -2670,6 +2817,7 @@ function FloorLayer({ dimensionsVisible, hideOpenings, measurementMode, onDelete
                   onPolygonChange={(points) => onZonePolygonChange(floorId, zone.id, points)}
                   onShapeChange={(patch) => onZoneShapeChange(floorId, zone.id, patch)}
                   selected={zoneActive}
+                  showDimensions={measurementMode === 'room'}
                   showEdgeCuts={measurementMode === 'tile'}
                   surfaceContour={area.contour}
                   view={view}
@@ -2694,7 +2842,7 @@ function FloorLayer({ dimensionsVisible, hideOpenings, measurementMode, onDelete
                 view={view}
               />
             ))}
-            {measurementMode === 'objects' ? project.objects.filter((object) => object.areaId === area.id).map((object) => (
+            {measurementMode === 'objects' ? project.objects.filter((object) => object.areaId === area.id && object.id === selectedObjectId).map((object) => (
               <ObjectDistanceLabels
                 key={`distance-${object.id}`}
                 contour={area.contour}
@@ -2703,19 +2851,20 @@ function FloorLayer({ dimensionsVisible, hideOpenings, measurementMode, onDelete
                 view={view}
               />
             )) : null}
-            {dimensionsVisible ? area.contour.map((_, index) => (
+            {dimensionsVisible && (dimensionEntryAreaId === area.id || selectedSurfaceId === floorId) && !selectedZoneId && !selectedOpeningId && !selectedObjectId && !selectedPartitionId ? area.contour.map((_, index) => (
               <FloorWallDimensionLabels
                 key={`${floorId}-dimension-${index}`}
                 areaId={area.id}
                 contour={area.contour}
                 index={index}
                 laneOffset={areaIndex * 26}
-                onEdit={shapeLocked ? undefined : () => onEditSegment({ type: 'floor-segment', areaId: area.id, index })}
+                compact={dimensionEntryAreaId === area.id}
+                onEdit={shapeLocked || (dimensionEntryAreaId && dimensionEntryAreaId !== area.id) ? undefined : () => onEditSegment({ type: 'floor-segment', areaId: area.id, index })}
                 partitions={project.room.partitions ?? []}
                 view={view}
               />
             )) : null}
-            {measurementMode === 'tile' ? (
+            {measurementMode === 'tile' && selectedSurfaceId === floorId && !selectedZoneId ? (
               <FloorEdgeCutLabels
                 contour={area.contour}
                 layout={baseZone.layout}
@@ -2881,17 +3030,20 @@ function FloorDistanceSpan({ start, end, view }: { start: PointMm; end: PointMm;
   );
 }
 
-function DimensionLabel({ x, y, text, onClick }: { x: number; y: number; text: string; onClick?: () => void }) {
+function DimensionLabel({ compact = false, x, y, text, onClick }: { compact?: boolean; x: number; y: number; text: string; onClick?: () => void }) {
+  const width = compact ? 76 : 96;
+  const height = compact ? 22 : 26;
   return (
     <Group x={x} y={y} listening={Boolean(onClick)} onClick={onClick} onTap={onClick}>
-      <Rect x={-48} y={-13} width={96} height={26} fill="#FFFFFF" stroke="#D9D9E2" strokeWidth={1} cornerRadius={4} shadowColor="rgba(30, 30, 40, 0.12)" shadowBlur={8} />
-      <Text x={-46} y={-7} width={92} align="center" text={text} fill="#18181E" fontSize={14} />
+      <Rect x={-width / 2} y={-height / 2} width={width} height={height} fill="#FFFFFF" stroke={onClick ? '#A385C4' : '#D9D9E2'} strokeWidth={1} cornerRadius={4} shadowColor="rgba(30, 30, 40, 0.12)" shadowBlur={compact ? 5 : 8} />
+      <Text x={-width / 2 + 2} y={compact ? -5 : -7} width={width - 4} align="center" text={text} fill="#18181E" fontSize={compact ? 11 : 14} />
     </Group>
   );
 }
 
 function FloorWallDimensionLabels({
   areaId,
+  compact,
   contour,
   index,
   laneOffset,
@@ -2900,6 +3052,7 @@ function FloorWallDimensionLabels({
   view,
 }: {
   areaId: string;
+  compact?: boolean;
   contour: PointMm[];
   index: number;
   laneOffset: number;
@@ -2923,8 +3076,17 @@ function FloorWallDimensionLabels({
     .sort((first, second) => segmentLength(start, first) - segmentLength(start, second));
 
   if (!attachedPoints.length) {
-    const label = offsetLabel(getFloorSegmentDimensionPosition(contour, start, end, view), start, end);
-    return <DimensionLabel x={label.x} y={label.y} text={`${segmentLength(start, end)} мм`} onClick={onEdit} />;
+    let label = offsetLabel(getFloorSegmentDimensionPosition(contour, start, end, view), start, end);
+    if (compact && segmentLength(start, end) < 1100) {
+      const box = getBoundingBox(contour);
+      const center = { x: view.x(box.minX + box.width / 2), y: view.y(box.minY + box.height / 2) };
+      const dx = label.x - center.x;
+      const dy = label.y - center.y;
+      const length = Math.max(1, Math.hypot(dx, dy));
+      const extra = 18 + (index % 3) * 16;
+      label = { x: label.x + dx / length * extra, y: label.y + dy / length * extra };
+    }
+    return <DimensionLabel compact={compact} x={label.x} y={label.y} text={compact ? `${index + 1} · ${segmentLength(start, end)}` : `${segmentLength(start, end)} мм`} onClick={onEdit} />;
   }
 
   const splitPoints = [start, ...attachedPoints, end].filter((point, pointIndex, points) => pointIndex === 0 || segmentLength(points[pointIndex - 1], point) > 1);
@@ -3212,7 +3374,7 @@ function WallsLayer({
                 })}
                 opacity={layoutOpacity}
                 selectedOpeningId={selectedOpeningId}
-                showEdgeCuts={tileOffsetsVisible && !selectedZoneId && !selectedOpeningId}
+                showEdgeCuts={tileOffsetsVisible && active && !selectedZoneId && !selectedOpeningId && !selectedObjectId}
               />
             ) : null}
             {surface?.zones.slice(1).map((zone) => {
@@ -3228,6 +3390,7 @@ function WallsLayer({
                   onShapeChange={(patch) => onZoneShapeChange(frame.id, zone.id, patch)}
                   opacity={active && selectedZoneId !== zone.id ? 0.48 : 1}
                   selected={selectedZoneId === zone.id}
+                  showDimensions={dimensionsVisible}
                   showEdgeCuts={tileOffsetsVisible}
                   zone={zone}
                 />
@@ -3259,8 +3422,17 @@ function WallsLayer({
               strokeWidth={active ? 5 : relatedToZone ? 3 : 1}
               listening={false}
             />
-            <Text x={frame.x} y={frame.y - 21} width={frame.width} align="center" text={frame.name} fill="#6B6B80" fontSize={13} listening={false} />
-            {dimensionsVisible ? (
+            <Text
+              x={frame.x}
+              y={tileOffsetsVisible && active ? frame.y - 48 : frame.y - 21}
+              width={frame.width}
+              align="center"
+              text={frame.name}
+              fill="#6B6B80"
+              fontSize={13}
+              listening={false}
+            />
+            {dimensionsVisible && active && !selectedZoneId && !selectedOpeningId && !selectedObjectId ? (
               <DimensionLabel
                 x={frame.x + frame.width / 2}
                 y={frame.y + frame.height + 50}
@@ -3271,7 +3443,7 @@ function WallsLayer({
           </Group>
         );
       })}
-      {dimensionsVisible ? firstFramesByArea.map((areaFrame) => {
+      {dimensionsVisible && !selectedZoneId && !selectedOpeningId && !selectedObjectId ? firstFramesByArea.filter((areaFrame) => frames.some((frame) => frame.areaId === areaFrame.areaId && frame.id === selectedSurfaceId)).map((areaFrame) => {
         const heightMarkerX = areaFrame.x - 90;
         return (
           <Group key={`height-${areaFrame.areaId}`}>
@@ -3395,7 +3567,6 @@ function WallTileLayout({
   showEdgeCuts: boolean;
 }) {
   const result = generateRectLayout({
-    blockedRects: openings.map((opening) => ({ type: 'rect' as const, xMm: opening.xMm, yMm: opening.yMm, widthMm: opening.widthMm, heightMm: opening.heightMm })),
     heightMm: frame.heightMm,
     layout,
     tileHeightMm: material.heightMm,
@@ -3413,9 +3584,20 @@ function WallTileLayout({
           y={frame.y + mmToCanvas(piece.yMm)}
           width={Math.max(1, mmToCanvas(piece.widthMm))}
           height={Math.max(1, mmToCanvas(piece.heightMm))}
-          fill={getLayoutPieceFill(piece.kind)}
+          fill={getLayoutPieceFill(piece.kind, material.swatch.value)}
           stroke={getLayoutPieceStroke(piece.kind)}
           strokeWidth={0.7}
+        />
+      ))}
+      {openings.map((opening) => (
+        <Rect
+          key={`opening-mask-${opening.id}`}
+          x={frame.x + mmToCanvas(opening.xMm)}
+          y={frame.y + mmToCanvas(opening.yMm)}
+          width={mmToCanvas(opening.widthMm)}
+          height={mmToCanvas(opening.heightMm)}
+          fill="#FFFFFF"
+          listening={false}
         />
       ))}
       {objectBlockers.map((blocker, index) => (
@@ -3680,6 +3862,7 @@ function WallZoneLayer({
   onShapeChange,
   opacity,
   selected,
+  showDimensions,
   showEdgeCuts,
   zone,
 }: {
@@ -3690,6 +3873,7 @@ function WallZoneLayer({
   onShapeChange: (patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   opacity: number;
   selected: boolean;
+  showDimensions: boolean;
   showEdgeCuts: boolean;
   zone: FinishZone;
 }) {
@@ -3722,11 +3906,15 @@ function WallZoneLayer({
       onMouseDown={(event) => { event.cancelBubble = true; onSelect(); }}
       onTouchStart={(event) => { event.cancelBubble = true; onSelect(); }}
       onDragStart={(event) => { event.cancelBubble = true; }}
-      onDragMove={(event) => { event.cancelBubble = true; }}
+      onDragMove={(event) => {
+        event.cancelBubble = true;
+        constrainZoneDrag(event.currentTarget, shape, frame.widthMm, frame.heightMm);
+      }}
       onDragEnd={(event) => {
         event.cancelBubble = true;
         if (event.target !== event.currentTarget) return;
         const node = event.currentTarget;
+        constrainZoneDrag(node, shape, frame.widthMm, frame.heightMm);
         onShapeChange({ xMm: shape.xMm + canvasToMm(node.x()), yMm: shape.yMm + canvasToMm(node.y()) });
         node.position({ x: 0, y: 0 });
       }}
@@ -3739,7 +3927,7 @@ function WallZoneLayer({
             y={y + mmToCanvas(piece.yMm)}
             width={Math.max(1, mmToCanvas(piece.widthMm))}
             height={Math.max(1, mmToCanvas(piece.heightMm))}
-            fill={getFloorLayoutPieceFill(piece.kind)}
+            fill={getFloorLayoutPieceFill(piece.kind, material.swatch.value)}
             stroke={getLayoutPieceStroke(piece.kind)}
             strokeWidth={0.7}
           />
@@ -3749,13 +3937,7 @@ function WallZoneLayer({
       {!selected ? <Text x={x + 10} y={y + 10} text={zone.name || 'Зона без названия'} fill="#6F4F93" fontSize={13} /> : null}
       {selected ? <ZoneResizeHandles height={height} onResize={onShapeChange} shape={shape} surfaceHeightMm={frame.heightMm} surfaceWidthMm={frame.widthMm} width={width} x={x} y={y} /> : null}
       {selected && showEdgeCuts ? <EdgeCutLabels edgeCuts={result.edgeOffsets} height={height} onEditOffset={onEditOffset} width={width} x={x} y={y} /> : null}
-      {selected ? (
-        <ZoneBoundsMeasurements
-          bounds={{ minX: shape.xMm, minY: shape.yMm, maxX: shape.xMm + shape.widthMm, maxY: shape.yMm + shape.heightMm, width: shape.widthMm, height: shape.heightMm }}
-          surfaceBounds={{ minX: 0, minY: 0, maxX: frame.widthMm, maxY: frame.heightMm, width: frame.widthMm, height: frame.heightMm }}
-          toCanvas={(point) => ({ x: frame.x + mmToCanvas(point.x), y: frame.y + mmToCanvas(point.y) })}
-        />
-      ) : null}
+      {selected && showDimensions ? <ZoneSizeMeasurement heightMm={shape.heightMm} widthMm={shape.widthMm} x={x + width / 2} y={y + height / 2} /> : null}
     </Group>
   );
 }
@@ -3792,7 +3974,7 @@ function FloorTileLayout({ blockedObjects, contour, layout, layoutBounds, materi
             key={piece.id}
             points={piece.polygon.flatMap((point) => [view.x(point.x + box.minX), view.y(point.y + box.minY)])}
             closed
-            fill={getFloorLayoutPieceFill(piece.kind)}
+            fill={getFloorLayoutPieceFill(piece.kind, material.swatch.value)}
             stroke={getLayoutPieceStroke(piece.kind)}
             strokeWidth={0.7}
           />
@@ -3803,7 +3985,7 @@ function FloorTileLayout({ blockedObjects, contour, layout, layoutBounds, materi
             y={view.y(piece.yMm + box.minY)}
             width={Math.max(1, mmToCanvas(piece.widthMm))}
             height={Math.max(1, mmToCanvas(piece.heightMm))}
-            fill={getFloorLayoutPieceFill(piece.kind)}
+            fill={getFloorLayoutPieceFill(piece.kind, material.swatch.value)}
             stroke={getLayoutPieceStroke(piece.kind)}
             strokeWidth={0.7}
           />
@@ -3833,6 +4015,7 @@ function FloorZoneLayer({
   onShapeChange,
   opacity,
   selected,
+  showDimensions,
   showEdgeCuts,
   surfaceContour,
   view,
@@ -3845,6 +4028,7 @@ function FloorZoneLayer({
   onShapeChange: (patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   opacity: number;
   selected: boolean;
+  showDimensions: boolean;
   showEdgeCuts: boolean;
   surfaceContour: PointMm[];
   view: PlanViewTransform;
@@ -3864,15 +4048,8 @@ function FloorZoneLayer({
         <Line points={canvasPoints} closed fill="rgba(242, 235, 249, 0.10)" stroke={selected ? '#6F4F93' : '#A385C4'} strokeWidth={selected ? 3 : 1.5} dash={selected ? undefined : [8, 6]} />
         {!selected ? <Text x={view.x(bounds.minX) + 10} y={view.y(bounds.minY) + 10} text={zone.name || 'Зона без названия'} fill="#6F4F93" fontSize={13} /> : null}
         {selected && showEdgeCuts ? <FloorEdgeCutLabels contour={zone.shape.points} layout={zone.layout} material={material} onEditOffset={onEditOffset} view={view} /> : null}
-        {selected ? <PolygonSideMeasurements closed points={zone.shape.points} toCanvas={(point) => ({ x: view.x(point.x), y: view.y(point.y) })} /> : null}
+        {selected && showDimensions ? <PolygonSideMeasurements closed points={zone.shape.points} toCanvas={(point) => ({ x: view.x(point.x), y: view.y(point.y) })} /> : null}
         {selected ? <PolygonZoneHandles points={zone.shape.points} surfaceContour={surfaceContour} view={view} onChange={onPolygonChange} /> : null}
-        {selected ? (
-          <ZoneBoundsMeasurements
-            bounds={bounds}
-            surfaceBounds={getFloorZoneDistanceBounds(surfaceContour, bounds)}
-            toCanvas={(point) => ({ x: view.x(point.x), y: view.y(point.y) })}
-          />
-        ) : null}
       </Group>
     );
   }
@@ -3908,11 +4085,15 @@ function FloorZoneLayer({
       onMouseDown={(event) => { event.cancelBubble = true; onSelect(); }}
       onTouchStart={(event) => { event.cancelBubble = true; onSelect(); }}
       onDragStart={(event) => { event.cancelBubble = true; }}
-      onDragMove={(event) => { event.cancelBubble = true; }}
+      onDragMove={(event) => {
+        event.cancelBubble = true;
+        constrainZoneDrag(event.currentTarget, shape, surfaceBox.width, surfaceBox.height);
+      }}
       onDragEnd={(event) => {
         event.cancelBubble = true;
         if (event.target !== event.currentTarget) return;
         const node = event.currentTarget;
+        constrainZoneDrag(node, shape, surfaceBox.width, surfaceBox.height);
         const nextX = shape.xMm + canvasToMm(node.x());
         const nextY = shape.yMm + canvasToMm(node.y());
         node.position({ x: 0, y: 0 });
@@ -3927,7 +4108,7 @@ function FloorZoneLayer({
             y={y + mmToCanvas(piece.yMm)}
             width={Math.max(1, mmToCanvas(piece.widthMm))}
             height={Math.max(1, mmToCanvas(piece.heightMm))}
-            fill={getLayoutPieceFill(piece.kind)}
+            fill={getLayoutPieceFill(piece.kind, material.swatch.value)}
             stroke={getLayoutPieceStroke(piece.kind)}
             strokeWidth={0.7}
           />
@@ -3937,13 +4118,7 @@ function FloorZoneLayer({
       {!selected ? <Text x={x + 10} y={y + 10} text={zone.name || 'Зона без названия'} fill="#6F4F93" fontSize={13} /> : null}
       {selected ? <ZoneResizeHandles height={height} onResize={onShapeChange} shape={zone.shape} surfaceHeightMm={surfaceBox.height} surfaceWidthMm={surfaceBox.width} width={width} x={x} y={y} /> : null}
       {selected && showEdgeCuts ? <EdgeCutLabels edgeCuts={result.edgeOffsets} height={height} onEditOffset={onEditOffset} width={width} x={x} y={y} /> : null}
-      {selected ? (
-        <ZoneBoundsMeasurements
-          bounds={bounds}
-          surfaceBounds={getFloorZoneDistanceBounds(surfaceContour, bounds)}
-          toCanvas={(point) => ({ x: view.x(point.x), y: view.y(point.y) })}
-        />
-      ) : null}
+      {selected && showDimensions ? <ZoneSizeMeasurement heightMm={shape.heightMm} widthMm={shape.widthMm} x={x + width / 2} y={y + height / 2} /> : null}
     </Group>
   );
 }
@@ -4016,6 +4191,17 @@ function isValidFloorZonePolygon(points: PointMm[], surfaceContour: PointMm[]): 
     }
   }
   return true;
+}
+
+function constrainZoneDrag(node: Konva.Node, shape: Extract<FinishZone['shape'], { type: 'rect' }>, surfaceWidthMm: number, surfaceHeightMm: number) {
+  const minDeltaXmm = -shape.xMm;
+  const maxDeltaXmm = surfaceWidthMm - shape.xMm - shape.widthMm;
+  const minDeltaYmm = -shape.yMm;
+  const maxDeltaYmm = surfaceHeightMm - shape.yMm - shape.heightMm;
+  node.position({
+    x: mmToCanvas(Math.max(minDeltaXmm, Math.min(maxDeltaXmm, canvasToMm(node.x())))),
+    y: mmToCanvas(Math.max(minDeltaYmm, Math.min(maxDeltaYmm, canvasToMm(node.y())))),
+  });
 }
 
 function ZoneResizeHandles({
@@ -4135,10 +4321,10 @@ function EdgeCutLabels({ edgeCuts, height, onEditOffset, width, x, y }: { edgeCu
   const right = edgeCuts.right ?? 0;
   return (
     <Group>
-      {top > 0 ? <SmallMetricLabel x={x + width / 2} y={y - 20} text={`${top} мм`} onClick={() => onEditOffset('top')} /> : null}
-      {bottom > 0 ? <SmallMetricLabel x={x + width / 2} y={y + height + 20} text={`${bottom} мм`} onClick={() => onEditOffset('bottom')} /> : null}
-      {left > 0 ? <SmallMetricLabel x={x - 42} y={y + height / 2} text={`${left} мм`} onClick={() => onEditOffset('left')} /> : null}
-      {right > 0 ? <SmallMetricLabel x={x + width + 42} y={y + height / 2} text={`${right} мм`} onClick={() => onEditOffset('right')} /> : null}
+      <SmallMetricLabel x={x + width / 2} y={y - 20} text={`${top} мм`} onClick={() => onEditOffset('top')} />
+      <SmallMetricLabel x={x + width / 2} y={y + height + 20} text={`${bottom} мм`} onClick={() => onEditOffset('bottom')} />
+      <SmallMetricLabel x={x - 42} y={y + height / 2} text={`${left} мм`} onClick={() => onEditOffset('left')} />
+      <SmallMetricLabel x={x + width + 42} y={y + height / 2} text={`${right} мм`} onClick={() => onEditOffset('right')} />
     </Group>
   );
 }
@@ -4152,16 +4338,23 @@ function SmallMetricLabel({ onClick, x, y, text }: { onClick?: () => void; x: nu
   );
 }
 
-function getLayoutPieceFill(kind: 'full' | 'cut' | 'critical') {
-  if (kind === 'critical') return 'rgba(111, 79, 147, 0.34)';
-  if (kind === 'cut') return 'rgba(163, 133, 196, 0.24)';
-  return 'rgba(255, 255, 255, 0.72)';
+function getLayoutPieceFill(kind: 'full' | 'cut' | 'critical', color = '#F2EBF9') {
+  if (kind === 'critical') return mixHexColor(color, '#6F4F93', 0.34);
+  if (kind === 'cut') return mixHexColor(color, '#A385C4', 0.2);
+  return color;
 }
 
-function getFloorLayoutPieceFill(kind: 'full' | 'cut' | 'critical') {
-  if (kind === 'critical') return '#CEC0DC';
-  if (kind === 'cut') return '#E9E0F0';
-  return '#FFFFFF';
+function getFloorLayoutPieceFill(kind: 'full' | 'cut' | 'critical', color = '#F2EBF9') {
+  if (kind === 'critical') return mixHexColor(color, '#6F4F93', 0.32);
+  if (kind === 'cut') return mixHexColor(color, '#FFFFFF', 0.3);
+  return color;
+}
+
+function mixHexColor(first: string, second: string, ratio: number): string {
+  const parse = (value: string) => /^#[0-9a-f]{6}$/i.test(value) ? [1, 3, 5].map((index) => Number.parseInt(value.slice(index, index + 2), 16)) : [242, 235, 249];
+  const left = parse(first);
+  const right = parse(second);
+  return `#${left.map((value, index) => Math.round(value * (1 - ratio) + right[index] * ratio).toString(16).padStart(2, '0')).join('')}`;
 }
 
 function getLayoutPieceStroke(kind: 'full' | 'cut' | 'critical') {
@@ -4176,6 +4369,16 @@ function getZoneShapeLabel(zone: FinishZone): string {
     return `По контуру · ${Math.round(bounds.width)} × ${Math.round(bounds.height)} мм`;
   }
   return `${zone.shape.widthMm} × ${zone.shape.heightMm} мм`;
+}
+
+function getZoneAreaId(project: TileProject, surface: TileProject['surfaces'][number], fallbackAreaIndex = 0): string {
+  const sourceParts = surface.sourceRef?.split(':') ?? [];
+  if (sourceParts[0] === 'floor' || sourceParts[0] === 'wall') return sourceParts[1] ?? project.room.areas?.[fallbackAreaIndex]?.id ?? 'room-1';
+  if (sourceParts[0] === 'partition') {
+    const partition = project.room.partitions?.find((item) => item.id === sourceParts[1]);
+    return partition?.areaId ?? project.room.areas?.[fallbackAreaIndex]?.id ?? 'room-1';
+  }
+  return project.room.areas?.[fallbackAreaIndex]?.id ?? 'room-1';
 }
 
 function TemplatePickerDialog({ onSelect, selectedTemplateId }: { onSelect: (templateId: string) => void; selectedTemplateId: string }) {
@@ -4437,11 +4640,8 @@ function ZonesPanel({
   activeZone,
   onCreateZone,
   onDeleteZone,
-  onEditTile,
-  onRenameZone,
+  onSaveZone,
   onSelectZone,
-  onSelectZoneSurface,
-  onZoneShapeChange,
   manualDrawingActive,
   manualPointCount,
   onCancelManualZone,
@@ -4454,12 +4654,9 @@ function ZonesPanel({
   activeSurface: TileProject['surfaces'][number] | null | undefined;
   activeZone: FinishZone | null | undefined;
   onCreateZone: (kind: ZonePresetKind) => void;
-  onDeleteZone: () => void;
-  onEditTile: () => void;
-  onRenameZone: (name: string) => void;
+  onDeleteZone: (surfaceId?: string | null, zoneId?: string | null) => void;
+  onSaveZone: (surfaceId: string, zoneId: string, name: string, shape: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   onSelectZone: (surfaceId: string, zoneId: string | null) => void;
-  onSelectZoneSurface: (surfaceId: string) => void;
-  onZoneShapeChange: (patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   manualDrawingActive: boolean;
   manualPointCount: number;
   onCancelManualZone: () => void;
@@ -4469,30 +4666,34 @@ function ZonesPanel({
   selectedSurfaceId: string | null;
   selectedZoneId: string | null;
 }) {
-  const surface = activeSurface ?? project.surfaces.find((item) => item.id === 'surface-floor');
-  const baseZone = surface?.zones[0] ?? null;
-  const extraZones = surface?.zones.slice(1) ?? [];
-  const editableShape = activeZone?.shape.type === 'rect' && selectedZoneId ? activeZone.shape : null;
-  const selectedExtraZone = selectedZoneId ? activeZone : null;
-  const zoneSurfaces = project.surfaces.filter((item) => item.type === 'floor' || item.type === 'wall');
-  const selectedMaterial = selectedExtraZone?.materialId ? project.materials.find((material) => material.id === selectedExtraZone.materialId) : null;
+  const surface = activeSurface?.type === 'floor' || activeSurface?.type === 'wall' ? activeSurface : null;
+  const [zoneDialog, setZoneDialog] = useState<{ mode: 'info' | 'edit'; surfaceId: string; zoneId: string } | null>(null);
+  const dialogSurface = zoneDialog ? project.surfaces.find((candidate) => candidate.id === zoneDialog.surfaceId) : null;
+  const dialogZone = dialogSurface?.zones.find((zone) => zone.id === zoneDialog?.zoneId) ?? null;
+  const areas = project.room.areas ?? [];
+  const zonesByArea = areas.map((area, areaIndex) => {
+    const surfaces = project.surfaces.filter((candidate) => {
+      if (candidate.type !== 'floor' && candidate.type !== 'wall') return false;
+      return getZoneAreaId(project, candidate, areaIndex) === area.id;
+    });
+    return { area, zones: surfaces.flatMap((candidate) => candidate.zones.slice(1).map((zone) => ({ surface: candidate, zone }))) };
+  });
+
+  function openZoneDialog(surfaceId: string, zoneId: string, mode: 'info' | 'edit') {
+    onSelectZone(surfaceId, zoneId);
+    setZoneDialog({ mode, surfaceId, zoneId });
+  }
 
   return (
     <section className="panel-card panel-section zones-panel">
       <h1>Зоны</h1>
-      <label className="zone-surface-picker">
-        <span>Поверхность для зоны</span>
-        <select value={surface?.id ?? ''} onChange={(event) => onSelectZoneSurface(event.currentTarget.value)}>
-          {zoneSurfaces.map((item) => <option key={item.id} value={item.id}>{getZoneSurfaceLabel(project, item)}</option>)}
-        </select>
-      </label>
-      <p className="zone-hint">Выберите пол или стену, затем обведите нужную область ручкой. После сохранения зона получит собственную плитку и название.</p>
+      <p className="zone-hint">Нажмите на нужный пол или стену прямо на схеме, затем создайте или нарисуйте зону.</p>
+      <div className={surface ? 'zone-current-surface selected' : 'zone-current-surface'}>{surface ? `Выбрано: ${getZoneSurfaceLabel(project, surface)}` : 'Сначала выберите помещение или стену на схеме'}</div>
       <div className="zone-actions">
-        <button type="button" className={manualDrawingActive ? 'active' : ''} onClick={manualDrawingActive ? onCancelManualZone : onStartManualZone}>✎ Нарисовать зону</button>
-        <button type="button" onClick={() => onCreateZone('rect')}>Прямоугольник</button>
-        {surface?.type === 'floor' ? <button type="button" onClick={() => onCreateZone('shower')}>Душевая</button> : null}
-        <button type="button" onClick={() => onCreateZone('horizontal-band')}>Горизонталь</button>
-        <button type="button" onClick={() => onCreateZone('vertical-band')}>Вертикаль</button>
+        <button type="button" disabled={!surface} className={manualDrawingActive ? 'active' : ''} onClick={manualDrawingActive ? onCancelManualZone : onStartManualZone}>✎ Нарисовать зону</button>
+        <button type="button" disabled={!surface} onClick={() => onCreateZone('rect')}>Прямоугольник</button>
+        <button type="button" disabled={!surface} onClick={() => onCreateZone('horizontal-band')}>Горизонталь</button>
+        <button type="button" disabled={!surface} onClick={() => onCreateZone('vertical-band')}>Вертикаль</button>
       </div>
       {manualDrawingActive ? (
         <div className="manual-zone-controls">
@@ -4501,58 +4702,107 @@ function ZonesPanel({
           <button type="button" className="secondary" onClick={onCancelManualZone}>Отмена</button>
         </div>
       ) : null}
-      <div className="zone-list">
-        {baseZone ? (
-          <button
-            type="button"
-            className={selectedSurfaceId === surface?.id && !selectedZoneId ? 'active' : ''}
-            onClick={() => surface && onSelectZone(surface.id, null)}
-          >
-            <strong>{surface?.name ?? 'Поверхность'}</strong>
-            <span>Базовая зона</span>
-          </button>
-        ) : null}
-        {extraZones.map((zone) => (
-          <button
-            type="button"
-            key={zone.id}
-            className={selectedZoneId === zone.id ? 'active' : ''}
-            onClick={() => surface && onSelectZone(surface.id, zone.id)}
-          >
-            <strong>{zone.name || 'Зона без названия'}</strong>
-            <span>{getZoneShapeLabel(zone)}</span>
-          </button>
+      <div className="zone-room-groups">
+        {zonesByArea.map(({ area, zones }) => (
+          <details key={area.id} open={zones.some(({ zone }) => zone.id === selectedZoneId)}>
+            <summary>{area.name}<span>{zones.length}</span></summary>
+            <div className="zone-management-list">
+              {zones.length ? zones.map(({ surface: zoneSurface, zone }) => (
+                <article key={zone.id} className={selectedZoneId === zone.id ? 'selected' : ''}>
+                  <button type="button" className="zone-name-button" onClick={() => onSelectZone(zoneSurface.id, zone.id)}>{zone.name || 'Зона без названия'}</button>
+                  <small>{zoneSurface.type === 'floor' ? 'Пол' : zoneSurface.name} · {getZoneShapeLabel(zone)}</small>
+                  <div><button type="button" onClick={() => openZoneDialog(zoneSurface.id, zone.id, 'info')}>Информация</button><button type="button" onClick={() => openZoneDialog(zoneSurface.id, zone.id, 'edit')}>Изменить</button><button type="button" onClick={() => onDeleteZone(zoneSurface.id, zone.id)}>Удалить</button></div>
+                </article>
+              )) : <p>Зон пока нет</p>}
+            </div>
+          </details>
         ))}
       </div>
-      {selectedExtraZone ? (
-        <div className="zone-editor">
-          <label className="zone-name-field">
-            Название зоны
-            <input type="text" maxLength={60} placeholder="Например, акцент у ванны" value={selectedExtraZone.name} onChange={(event) => onRenameZone(event.currentTarget.value)} />
-          </label>
-          {editableShape ? (
-            <>
-              <label>X, мм<input type="number" min={0} step={1} value={editableShape.xMm} onChange={(event) => onZoneShapeChange({ xMm: Number(event.currentTarget.value) })} /></label>
-              <label>Y, мм<input type="number" min={0} step={1} value={editableShape.yMm} onChange={(event) => onZoneShapeChange({ yMm: Number(event.currentTarget.value) })} /></label>
-              <label>Ширина, мм<input type="number" min={100} step={1} value={editableShape.widthMm} onChange={(event) => onZoneShapeChange({ widthMm: Number(event.currentTarget.value) })} /></label>
-              <label>Высота, мм<input type="number" min={100} step={1} value={editableShape.heightMm} onChange={(event) => onZoneShapeChange({ heightMm: Number(event.currentTarget.value) })} /></label>
-            </>
-          ) : <p className="zone-contour-note">Форма задана нарисованным контуром. Все размеры показаны непосредственно на макете.</p>}
-          <button type="button" className="zone-tile-button" onClick={onEditTile}>Плитка зоны: {selectedMaterial?.label ?? selectedMaterial?.name ?? 'выбрать'}</button>
-          <button type="button" className="zone-delete" onClick={onDeleteZone}>
-            <Trash2 size={15} />
-            Удалить зону
-          </button>
-        </div>
-      ) : null}
-      {activeZone && selectedZoneId ? (
-        <div className="zone-3d-preview" aria-label="Предпросмотр зоны">
-          <div className="zone-preview-floor"><span /></div>
-          <div className="zone-preview-wall"><span /></div>
-          <small>Предпросмотр зоны в помещении</small>
-        </div>
+      {zoneDialog && dialogSurface && dialogZone ? zoneDialog.mode === 'info' ? (
+        <ZoneInfoDialog project={project} surface={dialogSurface} zone={dialogZone} onClose={() => setZoneDialog(null)} />
+      ) : (
+        <ZoneEditDialog surface={dialogSurface} zone={dialogZone} onClose={() => setZoneDialog(null)} onSave={(name, shape) => { onSaveZone(dialogSurface.id, dialogZone.id, name, shape); setZoneDialog(null); }} />
       ) : null}
     </section>
+  );
+}
+
+function getZoneRectMetrics(surface: TileProject['surfaces'][number], zone: FinishZone) {
+  if (zone.shape.type !== 'rect') return null;
+  return {
+    bottom: Math.max(0, Math.round(surface.heightMm - zone.shape.yMm - zone.shape.heightMm)),
+    height: Math.round(zone.shape.heightMm),
+    left: Math.max(0, Math.round(zone.shape.xMm)),
+    right: Math.max(0, Math.round(surface.widthMm - zone.shape.xMm - zone.shape.widthMm)),
+    top: Math.max(0, Math.round(zone.shape.yMm)),
+    width: Math.round(zone.shape.widthMm),
+  };
+}
+
+function ZoneInfoDialog({ onClose, project, surface, zone }: { onClose: () => void; project: TileProject; surface: TileProject['surfaces'][number]; zone: FinishZone }) {
+  const metrics = getZoneRectMetrics(surface, zone);
+  const material = zone.materialId ? project.materials.find((item) => item.id === zone.materialId) : null;
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="confirm-dialog zone-details-dialog" role="dialog" aria-modal="true" aria-labelledby="zone-info-title">
+        <h2 id="zone-info-title">Информация о зоне</h2>
+        <dl className="zone-details-grid">
+          <div><dt>Название</dt><dd>{zone.name || 'Зона без названия'}</dd></div>
+          <div><dt>Поверхность</dt><dd>{getZoneSurfaceLabel(project, surface)}</dd></div>
+          <div><dt>Плитка</dt><dd>{material?.label ?? material?.name ?? 'Не выбрана'}</dd></div>
+          {metrics ? <><div><dt>Ширина</dt><dd>{metrics.width} мм</dd></div><div><dt>Длина</dt><dd>{metrics.height} мм</dd></div><div><dt>Отступ сверху</dt><dd>{metrics.top} мм</dd></div><div><dt>Отступ снизу</dt><dd>{metrics.bottom} мм</dd></div><div><dt>Отступ слева</dt><dd>{metrics.left} мм</dd></div><div><dt>Отступ справа</dt><dd>{metrics.right} мм</dd></div></> : <div><dt>Размер</dt><dd>{getZoneShapeLabel(zone)}</dd></div>}
+        </dl>
+        <div className="confirm-actions"><button type="button" className="confirm-submit" onClick={onClose}>Закрыть</button></div>
+      </section>
+    </div>
+  );
+}
+
+function ZoneEditDialog({ onClose, onSave, surface, zone }: { onClose: () => void; onSave: (name: string, shape: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void; surface: TileProject['surfaces'][number]; zone: FinishZone }) {
+  const initial = getZoneRectMetrics(surface, zone);
+  const [name, setName] = useState(zone.name);
+  const [values, setValues] = useState(initial ?? { bottom: 0, height: 0, left: 0, right: 0, top: 0, width: 0 });
+  const [error, setError] = useState<string | null>(null);
+
+  function change(field: keyof typeof values, rawValue: string) {
+    const value = Math.max(0, Math.round(Number(rawValue) || 0));
+    setValues((current) => {
+      const next = { ...current, [field]: value };
+      if (field === 'width' || field === 'left') next.right = Math.max(0, surface.widthMm - next.left - next.width);
+      if (field === 'right') next.left = Math.max(0, surface.widthMm - next.right - next.width);
+      if (field === 'height' || field === 'top') next.bottom = Math.max(0, surface.heightMm - next.top - next.height);
+      if (field === 'bottom') next.top = Math.max(0, surface.heightMm - next.bottom - next.height);
+      return next;
+    });
+  }
+
+  function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!initial) { setError('Размер этой зоны можно менять непосредственно на схеме.'); return; }
+    if (values.width < 100 || values.height < 100 || values.left + values.width > surface.widthMm || values.top + values.height > surface.heightMm) {
+      setError('Зона должна быть не меньше 100 мм и полностью находиться внутри выбранной поверхности.');
+      return;
+    }
+    onSave(name.trim() || 'Зона без названия', { xMm: values.left, yMm: values.top, widthMm: values.width, heightMm: values.height });
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <form className="confirm-dialog zone-details-dialog" role="dialog" aria-modal="true" aria-labelledby="zone-edit-title" onSubmit={submit}>
+        <h2 id="zone-edit-title">Изменить зону</h2>
+        <div className="zone-edit-fields">
+          <label className="wide">Название<input type="text" maxLength={60} value={name} onChange={(event) => setName(event.currentTarget.value)} /></label>
+          <label>Ширина, мм<input type="number" min={100} step={1} value={values.width} onChange={(event) => change('width', event.currentTarget.value)} /></label>
+          <label>Длина, мм<input type="number" min={100} step={1} value={values.height} onChange={(event) => change('height', event.currentTarget.value)} /></label>
+          <label>Отступ сверху, мм<input type="number" min={0} step={1} value={values.top} onChange={(event) => change('top', event.currentTarget.value)} /></label>
+          <label>Отступ снизу, мм<input type="number" min={0} step={1} value={values.bottom} onChange={(event) => change('bottom', event.currentTarget.value)} /></label>
+          <label>Отступ слева, мм<input type="number" min={0} step={1} value={values.left} onChange={(event) => change('left', event.currentTarget.value)} /></label>
+          <label>Отступ справа, мм<input type="number" min={0} step={1} value={values.right} onChange={(event) => change('right', event.currentTarget.value)} /></label>
+        </div>
+        {error ? <p className="error-text">{error}</p> : null}
+        <div className="confirm-actions"><button type="button" className="confirm-cancel" onClick={onClose}>Отмена</button><button type="submit" className="confirm-submit">Сохранить</button></div>
+      </form>
+    </div>
   );
 }
 

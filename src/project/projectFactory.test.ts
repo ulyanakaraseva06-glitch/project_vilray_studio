@@ -13,6 +13,7 @@ import {
   addWallZone,
   createProjectFromTemplate,
   connectRoomOpenings,
+  confirmRoomAreaDimensions,
   deleteOpening,
   deletePartition,
   deleteRoomObject,
@@ -45,9 +46,29 @@ import {
   updateZoneName,
   updateZoneShape,
   updateZoneTileMaterial,
+  updateZoneTileColor,
 } from './projectFactory';
 
 describe('project factory', () => {
+  it('assigns an independent pastel color to the selected surface zone', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const zoneId = project.surfaces.find((surface) => surface.id === 'surface-floor')!.zones[0].id;
+    const colored = updateZoneTileColor(project, 'surface-floor', zoneId, '#D5E6F3');
+
+    expect(getZoneMaterial(colored, 'surface-floor', zoneId)?.swatch.value).toBe('#D5E6F3');
+    expect(colored.surfaces.find((surface) => surface.id === 'surface-wall-1')?.zones[0].materialId).toBe(project.surfaces.find((surface) => surface.id === 'surface-wall-1')?.zones[0].materialId);
+  });
+
+  it('locks a ready room after its wall dimensions are confirmed once', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const saved = confirmRoomAreaDimensions(project, 'room-1', [3000, 2400, 3000, 2400]);
+    const repeated = confirmRoomAreaDimensions(saved.project, 'room-1', [4000, 3200, 4000, 3200]);
+
+    expect(saved.error).toBeUndefined();
+    expect(saved.project.room.areas?.[0]).toMatchObject({ shapeLocked: true });
+    expect(repeated.project.room.areas?.[0]?.contour).toEqual(saved.project.room.areas?.[0]?.contour);
+  });
+
   it('creates schema version 1 project from template', () => {
     const project = createProjectFromTemplate(templates[0], [1700, 2000]);
     expect(project.schemaVersion).toBe(1);
@@ -166,7 +187,7 @@ describe('project factory', () => {
   });
 
   it('stores manual layout offset for one zone', () => {
-    const project = addFloorZone(createProjectFromTemplate(templates[0], [1700, 2000]), 'shower');
+    const project = addFloorZone(createProjectFromTemplate(templates[0], [1700, 2000]), 'horizontal-band');
     const zone = project.surfaces.find((surface) => surface.id === 'surface-floor')!.zones[1]!;
     const updated = updateZoneLayoutOffset(project, 'surface-floor', zone.id, 40, 30);
     const layout = updated.surfaces.find((surface) => surface.id === 'surface-floor')?.zones[1]?.layout;

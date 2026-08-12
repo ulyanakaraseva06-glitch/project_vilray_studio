@@ -1,6 +1,6 @@
 import { serviceConfig, templates, tileSizePresets } from '../config/appConfig';
 import type { FinishZone, Opening, Partition, PointMm, ProjectSettings, RectZone, Room, RoomArea, RoomObject, RoomTemplate, Surface, TileMaterial, TileProject, TileSizePreset } from '../types/project';
-import { createContourFromTemplate, createSurfacesFromRoom, getBoundingBox, moveWall, normalizeRoomModel, segmentLength, updateSegmentLength, validateRoomHeight } from './geometry';
+import { createContourFromTemplate, createSurfacesFromRoom, getBoundingBox, moveWall, normalizeRoomModel, segmentLength, updateSegmentLength, validateContour, validateRoomHeight } from './geometry';
 
 const PRIMARY_MATERIAL_ID = 'material-primary';
 const DEFAULT_TILE_PRESET_ID = '600x1200';
@@ -105,6 +105,31 @@ export function updateRoomAreaSegmentLength(project: TileProject, areaId: string
   return updateRoomAreaContour(normalized, areaIndex, updateSegmentLength(areas[areaIndex].contour, segmentIndex, lengthMm));
 }
 
+export function confirmRoomAreaDimensions(project: TileProject, areaId: string, lengthsMm: number[]): { error?: string; project: TileProject } {
+  const normalized = ensureProjectDefaults(project);
+  const areas = normalized.room.areas ?? [];
+  const areaIndex = areas.findIndex((area) => area.id === areaId);
+  if (areaIndex < 0 || areas[areaIndex].shapeLocked) return { project: normalized };
+  if (lengthsMm.length !== areas[areaIndex].contour.length || lengthsMm.some((length) => !Number.isFinite(length) || length < 250)) {
+    return { error: 'Укажите корректную длину каждой стены — не меньше 250 мм.', project: normalized };
+  }
+  let contour = areas[areaIndex].contour;
+  lengthsMm.forEach((length, index) => { contour = updateSegmentLength(contour, index, length); });
+  const validation = validateContour(contour);
+  if (!validation.ok) return { error: validation.message ?? 'Такие размеры не образуют корректное помещение.', project: normalized };
+  const actualLengths = contour.map((point, index) => Math.round(Math.hypot(contour[(index + 1) % contour.length].x - point.x, contour[(index + 1) % contour.length].y - point.y)));
+  if (actualLengths.some((length, index) => Math.abs(length - Math.round(lengthsMm[index])) > 1)) {
+    return { error: 'Указанные длины не замыкают выбранную форму. Проверьте размеры противоположных и соседних стен.', project: normalized };
+  }
+  const materialId = getPrimaryMaterial(normalized)?.id ?? null;
+  const room = normalizeRoomModel({
+    ...normalized.room,
+    contour: areaIndex === 0 ? contour : normalized.room.contour,
+    areas: areas.map((area, index) => index === areaIndex ? { ...area, contour, shapeLocked: true } : area),
+  });
+  return { project: { ...normalized, updatedAt: new Date().toISOString(), room, surfaces: createSurfacesWithAssignments(room, normalized, materialId) } };
+}
+
 export function moveRoomAreaWall(project: TileProject, areaId: string, segmentIndex: number, deltaMm: number): TileProject {
   const normalized = ensureProjectDefaults(project);
   const room = normalizeRoomModel(normalized.room);
@@ -173,6 +198,22 @@ export function updateZoneTileMaterial(project: TileProject, surfaceId: string, 
   const normalized = ensureProjectDefaults(project);
   const material = findMatchingMaterial(normalized.materials, tile.widthMm, tile.heightMm, tile.id) ?? createMaterialFromPreset(tile, normalized.settings, getAvailableMaterialId(normalized.materials, `material-${tile.id}`));
   return assignMaterialToZone(normalized, surfaceId, zoneId, material);
+}
+
+export function updateZoneTileColor(project: TileProject, surfaceId: string, zoneId: string, color: string): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const surface = normalized.surfaces.find((item) => item.id === surfaceId);
+  const zone = surface?.zones.find((item) => item.id === zoneId);
+  const source = zone?.materialId ? normalized.materials.find((item) => item.id === zone.materialId) : getPrimaryMaterial(normalized);
+  if (!surface || !zone || !source || !/^#[0-9a-f]{6}$/i.test(color)) return normalized;
+  const materialId = `material-color-${surfaceId}-${zoneId}`.replace(/[^a-z0-9-]/gi, '-');
+  const material: TileMaterial = { ...source, id: materialId, name: `${source.name} — ${color.toUpperCase()}`, swatch: { type: 'color', value: color.toUpperCase() } };
+  return {
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+    materials: upsertMaterial(normalized.materials, material),
+    surfaces: normalized.surfaces.map((item) => item.id === surfaceId ? { ...item, zones: item.zones.map((candidate) => candidate.id === zoneId ? { ...candidate, materialId } : candidate) } : item),
+  };
 }
 
 export function updateZoneCustomTileMaterial(project: TileProject, surfaceId: string, zoneId: string, widthMm: number, heightMm: number): TileProject {
@@ -263,7 +304,7 @@ export function updateZoneLayoutOffset(project: TileProject, surfaceId: string, 
   };
 }
 
-export type ZonePresetKind = 'rect' | 'shower' | 'horizontal-band' | 'vertical-band';
+export type ZonePresetKind = 'rect' | 'horizontal-band' | 'vertical-band';
 
 export function addFloorZone(project: TileProject, kind: ZonePresetKind, surfaceId = 'surface-floor'): TileProject {
   const normalized = ensureProjectDefaults(project);
@@ -275,7 +316,7 @@ export function addFloorZone(project: TileProject, kind: ZonePresetKind, surface
   return appendZone(normalized, floor.id, zone);
 }
 
-export function addWallZone(project: TileProject, surfaceId: string, kind: Exclude<ZonePresetKind, 'shower'>): TileProject {
+export function addWallZone(project: TileProject, surfaceId: string, kind: ZonePresetKind): TileProject {
   const normalized = ensureProjectDefaults(project);
   const wall = normalized.surfaces.find((surface) => surface.id === surfaceId && surface.type === 'wall');
   if (!wall) return normalized;
@@ -1499,15 +1540,13 @@ function appendZone(project: TileProject, surfaceId: string, zone: FinishZone): 
   };
 }
 
-function createFloorZone(surface: Surface, materialId: string | null, settings: ProjectSettings, kind: 'rect' | 'shower' | 'horizontal-band' | 'vertical-band') {
+function createFloorZone(surface: Surface, materialId: string | null, settings: ProjectSettings, kind: ZonePresetKind) {
   const width = Math.max(1, surface.widthMm);
   const height = Math.max(1, surface.heightMm);
   const shortSide = Math.min(width, height);
   const band = Math.max(250, Math.round(shortSide * 0.22));
   const rectWidth = Math.max(300, Math.round(width * 0.42));
   const rectHeight = Math.max(300, Math.round(height * 0.34));
-  const showerWidth = Math.min(width, Math.max(800, Math.round(width * 0.38)));
-  const showerHeight = Math.min(height, Math.max(900, Math.round(height * 0.42)));
   const shapeByKind = {
     rect: {
       type: 'rect' as const,
@@ -1515,13 +1554,6 @@ function createFloorZone(surface: Surface, materialId: string | null, settings: 
       yMm: Math.round((height - rectHeight) / 2),
       widthMm: Math.min(width, rectWidth),
       heightMm: Math.min(height, rectHeight),
-    },
-    shower: {
-      type: 'rect' as const,
-      xMm: Math.max(0, width - showerWidth),
-      yMm: 0,
-      widthMm: showerWidth,
-      heightMm: showerHeight,
     },
     'horizontal-band': {
       type: 'rect' as const,
@@ -1540,7 +1572,6 @@ function createFloorZone(surface: Surface, materialId: string | null, settings: 
   };
   const nameByKind = {
     rect: 'Зона',
-    shower: 'Душевая',
     'horizontal-band': 'Горизонтальная полоса',
     'vertical-band': 'Вертикальная полоса',
   };
