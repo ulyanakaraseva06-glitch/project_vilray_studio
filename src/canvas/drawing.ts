@@ -78,6 +78,10 @@ export function canCloseContour(points: PointMm[]): boolean {
   return points.length >= CUSTOM_DRAW_MIN_POINTS;
 }
 
+export function isExplicitlyClosedContour(points: PointMm[]): boolean {
+  return points.length > CUSTOM_DRAW_MIN_POINTS && samePoint(points[0], points[points.length - 1]);
+}
+
 export function validateDraftPoint(points: PointMm[], nextPoint: PointMm): string | null {
   const previous = points[points.length - 1];
   if (!previous) return null;

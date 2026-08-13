@@ -48,7 +48,7 @@ export interface ProjectCalculation {
 }
 
 export function calculateProject(project: TileProject): ProjectCalculation {
-  const zones = project.surfaces.flatMap((surface) =>
+  const rawZones = project.surfaces.flatMap((surface) =>
     surface.zones.flatMap((zone) => {
       const material = project.materials.find((item) => item.id === zone.materialId) ?? project.materials[0];
       if (!material) return [];
@@ -79,6 +79,32 @@ export function calculateProject(project: TileProject): ProjectCalculation {
       };
     }),
   );
+  const zones = rawZones.map((zone) => {
+    const surface = project.surfaces.find((item) => item.id === zone.surfaceId);
+    if (!surface || surface.zones[0]?.id !== zone.zoneId) return zone;
+    const replacementAreaM2 = sum(rawZones.filter((candidate) => candidate.surfaceId === zone.surfaceId && candidate.zoneId !== zone.zoneId).map((candidate) => candidate.areaM2));
+    if (!replacementAreaM2 || !zone.areaM2) return zone;
+    const areaM2 = roundM2(Math.max(0, zone.areaM2 - replacementAreaM2));
+    const ratio = Math.max(0, Math.min(1, areaM2 / zone.areaM2));
+    const fullPieces = Math.round(zone.fullPieces * ratio);
+    const cutPieces = Math.round(zone.cutPieces * ratio);
+    const criticalPieces = Math.round(zone.criticalPieces * ratio);
+    const totalPieces = fullPieces + cutPieces + criticalPieces;
+    const reservePieces = Math.round(zone.reservePieces * ratio);
+    const purchasePieces = totalPieces + reservePieces;
+    const material = project.materials.find((item) => item.id === zone.materialId);
+    return {
+      ...zone,
+      areaM2,
+      boxes: material ? calculateBoxes(material, purchasePieces, areaM2 * 1_000_000) : zone.boxes,
+      criticalPieces,
+      cutPieces,
+      fullPieces,
+      purchasePieces,
+      reservePieces,
+      totalPieces,
+    };
+  });
 
   const materials = project.materials.flatMap((material) => {
     const materialZones = zones.filter((zone) => zone.materialId === material.id);

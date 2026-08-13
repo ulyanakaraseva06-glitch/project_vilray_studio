@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildClosedContour, buildClosedOrthogonalContour, canCloseContour, constrainFreePoint, constrainOrthogonalPoint, constrainOrthogonalResizePoint, snapMm, validateDraftPoint } from './drawing';
+import { buildClosedContour, buildClosedOrthogonalContour, canCloseContour, constrainFreePoint, constrainOrthogonalPoint, constrainOrthogonalResizePoint, isExplicitlyClosedContour, snapMm, validateDraftPoint } from './drawing';
 
 describe('custom room drawing', () => {
   it('keeps millimeter precision while drawing', () => {
@@ -48,6 +48,12 @@ describe('custom room drawing', () => {
   it('requires at least three points before closing', () => {
     expect(canCloseContour([{ x: 0, y: 0 }, { x: 1000, y: 0 }])).toBe(false);
     expect(canCloseContour([{ x: 0, y: 0 }, { x: 1000, y: 0 }, { x: 500, y: 1000 }])).toBe(true);
+  });
+
+  it('marks the contour ready only after the last point matches the first', () => {
+    const open = [{ x: 0, y: 0 }, { x: 1000, y: 0 }, { x: 1000, y: 1000 }];
+    expect(isExplicitlyClosedContour(open)).toBe(false);
+    expect(isExplicitlyClosedContour([...open, { x: 0, y: 0 }])).toBe(true);
   });
 
   it('closes and normalizes a diagonal contour without adding a point', () => {

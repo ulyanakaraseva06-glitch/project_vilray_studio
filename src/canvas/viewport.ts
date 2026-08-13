@@ -4,7 +4,7 @@ export interface CanvasViewport {
   zoom: number;
 }
 
-export const MIN_ZOOM = 0.65;
+export const MIN_ZOOM = 0.35;
 export const MAX_ZOOM = 2.2;
 
 export function clampZoom(zoom: number): number {

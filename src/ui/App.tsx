@@ -22,7 +22,6 @@ import type Konva from 'konva';
 import { getVisibleTilePresets, templates } from '../config/appConfig';
 import {
   addRoomFromContour,
-  addRoomFromTemplate,
   addFloorZone,
   addManualZone,
   addOpeningDetailed,
@@ -35,6 +34,7 @@ import {
   constrainRoomObjectPosition,
   deleteOpening,
   deletePartition,
+  deleteRoomArea,
   deleteRoomObject,
   deleteZone,
   ensureProjectDefaults,
@@ -45,6 +45,7 @@ import {
   getZoneMaterial,
   moveRoomAreaChecked,
   moveRoomAreaWall,
+  previewRoomAreaWall,
   moveOpening,
   movePartition,
   moveRoomObject,
@@ -82,11 +83,11 @@ import { getBoundingBox, moveWall, segmentLength, validateContour } from '../pro
 import {
   buildClosedContour,
   buildClosedOrthogonalContour,
-  canCloseContour,
   constrainFreePoint,
   constrainOrthogonalPoint,
   constrainOrthogonalResizePoint,
   CUSTOM_DRAW_MAX_POINTS,
+  isExplicitlyClosedContour,
   validateDraftPoint,
 } from '../canvas/drawing';
 import { calculateWallsStartY } from '../canvas/layout';
@@ -98,6 +99,7 @@ type EditTarget =
   | { type: 'floor-segment'; areaId: string; index: number }
   | { type: 'wall-segment'; areaId: string; index: number; surfaceId: string }
   | { type: 'wall-height'; areaId: string }
+  | { type: 'partition-length'; partitionId: string }
   | { type: 'layout-offset'; edge: keyof LayoutEdgeCuts; surfaceId: string; zoneId: string }
   | null;
 
@@ -111,7 +113,7 @@ type CanvasLayers = {
 type DrawingMode = 'idle' | 'custom-room' | 'custom-room-review';
 type CustomDrawingMode = 'orthogonal' | 'free';
 type PanelTab = 'tile' | 'room' | 'objects' | 'zones';
-type TilePanelSection = 'format' | 'laying' | 'origin' | 'movement';
+type TilePanelSection = 'format' | 'laying' | 'offset' | 'origin' | 'movement';
 type CustomDrawingTarget = 'primary' | 'additional';
 type MeasurementMode = 'room' | 'tile' | 'objects';
 
@@ -120,6 +122,7 @@ type ConfirmAction =
   | { type: 'template'; templateId: string }
   | { type: 'delete-opening'; id: string }
   | { type: 'delete-partition'; id: string }
+  | { type: 'delete-room-area'; areaId: string }
   | { type: 'delete-object'; id: string }
   | { type: 'delete-zone'; surfaceId: string; zoneId: string }
   | null;
@@ -136,7 +139,7 @@ type InlineEdit = {
 const tilePresets = getVisibleTilePresets();
 const initialCanvasSize = { width: 1120, height: 760 };
 const PLAN_OFFSET_X = 170;
-const PLAN_OFFSET_Y = 118;
+const PLAN_OFFSET_Y = 160;
 const primaryPastelColors = ['#F2D7D9', '#F6E3C5', '#DDEBD4', '#D5E6F3', '#E5D8F1'];
 const extendedPastelColors = ['#F3CED8', '#F5D8C4', '#F5EDC9', '#D9EBCF', '#CDE9DE', '#CEE8EE', '#CFDDF2', '#D8D2F1', '#E8D2EE', '#F1D4E2', '#E4DDD5', '#D9DEE2'];
 
@@ -160,6 +163,7 @@ export function App() {
   const [selectedPartitionId, setSelectedPartitionId] = useState<string | null>(null);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [activePanelTab, setActivePanelTab] = useState<PanelTab>('room');
+  const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
   const [layoutDragEnabled, setLayoutDragEnabled] = useState(false);
   const [calculationOpen, setCalculationOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
@@ -192,8 +196,10 @@ export function App() {
   const [openingDialogSurfaceId, setOpeningDialogSurfaceId] = useState<string | null>(null);
   const [manualZoneSurfaceId, setManualZoneSurfaceId] = useState<string | null>(null);
   const [manualZonePoints, setManualZonePoints] = useState<PointMm[]>([]);
+  const [manualZoneDrawingMode, setManualZoneDrawingMode] = useState<CustomDrawingMode>('orthogonal');
   const [roomDimensionsAreaId, setRoomDimensionsAreaId] = useState<string | null>(null);
   const [roomDimensionsError, setRoomDimensionsError] = useState<string | null>(null);
+  const [additionalRoomDraft, setAdditionalRoomDraft] = useState<TileProject | null>(null);
   const historyRef = useRef<{ applying: boolean; current: TileProject; future: TileProject[]; past: TileProject[] }>({ applying: false, current: initialAppState.project, future: [], past: [] });
   const projectFileInputRef = useRef<HTMLInputElement>(null);
   const [, setHistoryRevision] = useState(0);
@@ -279,6 +285,7 @@ export function App() {
   }
 
   function applyTemplateNow(templateId: string) {
+    setAdditionalRoomDraft(null);
     if (templateId === 'custom') {
       setTemplatePickerOpen(false);
       beginCustomDrawing('primary');
@@ -286,6 +293,12 @@ export function App() {
     }
     const template = templates.find((item) => item.id === templateId);
     if (!template) return;
+    setDrawingMode('idle');
+    setDraftContour([]);
+    setDraftWallStart(null);
+    setDrawingToolArmed(true);
+    setDrawingError(null);
+    setCustomDrawingTarget('primary');
     setSelectedTemplateId(template.id);
     selectSurface('surface-floor');
     setEditTarget(null);
@@ -301,6 +314,7 @@ export function App() {
   }
 
   function beginCustomDrawing(target: CustomDrawingTarget) {
+    setAdditionalRoomDraft(null);
     setCustomDrawingTarget(target);
     if (target === 'primary') setSelectedTemplateId('custom');
     selectSurface(null);
@@ -468,6 +482,8 @@ export function App() {
       setProject((current) => updateRoomContour({ ...current, room: { ...current.room, templateId: null } }, draftContour, true));
       setSelectedTemplateId('custom');
       selectSurface('surface-floor');
+      setRoomDimensionsAreaId(null);
+      setRoomDimensionsError(null);
     }
     setDraftContour([]);
     setDraftWallStart(null);
@@ -488,6 +504,11 @@ export function App() {
   function changeSegmentLength(target: Extract<Exclude<EditTarget, null>, { type: 'floor-segment' | 'wall-segment' }>, value: string) {
     const length = Number(value);
     if (!Number.isFinite(length)) return;
+    if (additionalRoomDraft) {
+      setAdditionalRoomDraft((current) => current ? updateRoomAreaSegmentLength(current, target.areaId, target.index, length) : current);
+      setEditTarget(null);
+      return;
+    }
     setHasRoomEdits(true);
     setProject((current) => updateRoomAreaSegmentLength(current, target.areaId, target.index, length));
     setEditTarget(null);
@@ -525,6 +546,10 @@ export function App() {
   }
 
   function dragWall(areaId: string, index: number, deltaMm: number) {
+    if (additionalRoomDraft) {
+      setAdditionalRoomDraft((current) => current ? moveRoomAreaWall(current, areaId, index, deltaMm) : current);
+      return;
+    }
     setHasRoomEdits(true);
     setProject((current) => moveRoomAreaWall(current, areaId, index, deltaMm));
   }
@@ -628,14 +653,15 @@ export function App() {
     }
     const template = templates.find((item) => item.id === templateId);
     if (!template) return;
-    const nextAreaId = `room-${(project.room.areas?.length ?? 1) + 1}`;
-    setHasRoomEdits(true);
-    const nextProject = addRoomFromTemplate(project, template, getPreferredTemplateSize(template));
-    setProject(nextProject);
-    setRoomDimensionsAreaId(nextAreaId);
+    const draftProject = createProjectFromTemplate(template, getPreferredTemplateSize(template), project);
+    const draftAreaId = draftProject.room.areas?.[0]?.id ?? 'room-1';
+    setAdditionalRoomDraft(draftProject);
+    setRoomDimensionsAreaId(draftAreaId);
     setRoomDimensionsError(null);
     setLayers({ grid: true, floor: true, walls: false, dimensions: true });
-    selectSurface(`surface-floor-${nextAreaId}`);
+    selectSurface(null);
+    setEditTarget(null);
+    setViewport(resetViewport());
     setActivePanelTab('room');
   }
 
@@ -653,10 +679,16 @@ export function App() {
     setHasRoomEdits(true);
     setProject((current) => {
       const added = addOpeningDetailed(current, surfaceId, kind, dimensions);
-      if (!added.opening || added.opening.kind === 'window') return added.project;
+      if (!added.opening) return added.project;
+      setSelectedSurfaceId(surfaceId);
+      setSelectedOpeningId(added.opening.id);
+      setSelectedZoneId(null);
+      setSelectedPartitionId(null);
+      setSelectedObjectId(null);
+      if (added.opening.kind === 'window') return added.project;
       const candidates = getOpeningConnectionCandidates(added.project, added.opening.id);
       if (!candidates.length) return added.project;
-      if ((added.project.room.areas?.length ?? 1) === 2 && candidates.length === 1) {
+      if (candidates.length === 1) {
         const connected = connectRoomOpenings(added.project, added.opening.id, candidates[0].openingId);
         setRoomActionMessage(connected.error ?? `${added.opening.name} соединена с ${candidates[0].label}. Помещения объединены в общую схему.`);
         return connected.project;
@@ -693,6 +725,10 @@ export function App() {
 
   function deleteSurfaceOpening(openingId: string) {
     setConfirmAction({ type: 'delete-opening', id: openingId });
+  }
+
+  function deleteFloorArea(areaId: string) {
+    setConfirmAction({ type: 'delete-room-area', areaId });
   }
 
   function createPartition() {
@@ -732,23 +768,36 @@ export function App() {
     setDrawingError(null);
   }
 
-  function moveSurfacePartition(partitionId: string, deltaXmm: number, deltaYmm: number) {
+  function moveSurfacePartition(partitionId: string, start: PointMm, end: PointMm) {
     const partition = project.room.partitions?.find((item) => item.id === partitionId);
     if (!partition) return;
     const area = project.room.areas?.find((item) => item.id === partition.areaId);
     if (!area) return;
-    const wallIndex = partition.wallIndex ?? findBoundarySegmentIndex(area.contour, partition.start);
-    if (wallIndex < 0) return;
-    const wallStart = area.contour[wallIndex];
-    const wallEnd = area.contour[(wallIndex + 1) % area.contour.length];
-    const proposedStart = { x: partition.start.x + deltaXmm, y: partition.start.y + deltaYmm };
-    const snappedStart = projectPointToSegment(proposedStart, wallStart, wallEnd);
-    const appliedDelta = { x: snappedStart.x - partition.start.x, y: snappedStart.y - partition.start.y };
-    const end = { x: partition.end.x + appliedDelta.x, y: partition.end.y + appliedDelta.y };
-    const crossesPartition = (project.room.partitions ?? []).some((item) => item.id !== partitionId && segmentsCross(snappedStart, end, item.start, item.end));
-    if (!isPartitionInsideContour(area.contour, snappedStart, end) || crossesPartition) return;
+    if (!isPartitionPlacementValid(area.contour, start, end, project.room.partitions ?? [], partitionId)) {
+      setRoomActionMessage('Перегородка должна полностью находиться внутри помещения и не пересекать другие перегородки.');
+      return;
+    }
     setHasRoomEdits(true);
-    setProject((current) => movePartition(current, partitionId, snappedStart, end));
+    setProject((current) => movePartition(current, partitionId, start, end));
+  }
+
+  function changePartitionLength(partitionId: string, value: string) {
+    const lengthMm = Number(value);
+    const partition = project.room.partitions?.find((item) => item.id === partitionId);
+    const area = project.room.areas?.find((item) => item.id === partition?.areaId);
+    if (!partition || !area || !Number.isInteger(lengthMm) || lengthMm < 250) return;
+    const currentLength = segmentLength(partition.start, partition.end);
+    if (!currentLength) return;
+    const center = { x: (partition.start.x + partition.end.x) / 2, y: (partition.start.y + partition.end.y) / 2 };
+    const direction = { x: (partition.end.x - partition.start.x) / currentLength, y: (partition.end.y - partition.start.y) / currentLength };
+    const start = { x: Math.round(center.x - direction.x * lengthMm / 2), y: Math.round(center.y - direction.y * lengthMm / 2) };
+    const end = { x: Math.round(center.x + direction.x * lengthMm / 2), y: Math.round(center.y + direction.y * lengthMm / 2) };
+    if (!isPartitionPlacementValid(area.contour, start, end, project.room.partitions ?? [], partitionId)) {
+      setRoomActionMessage('Такая длина не помещается внутри помещения. Уменьшите значение или переместите перегородку.');
+      return;
+    }
+    setHasRoomEdits(true);
+    setProject((current) => movePartition(current, partitionId, start, end));
   }
 
   function resetSurfacePartition(partitionId: string) {
@@ -845,12 +894,29 @@ export function App() {
   }
 
   function saveRoomDimensions(areaId: string) {
-    const area = project.room.areas?.find((item) => item.id === areaId);
+    const sourceProject = additionalRoomDraft ?? project;
+    const area = sourceProject.room.areas?.find((item) => item.id === areaId);
     if (!area) return;
     const lengthsMm = area.contour.map((point, index) => Math.round(segmentLength(point, area.contour[(index + 1) % area.contour.length])));
-    const result = confirmRoomAreaDimensions(project, areaId, lengthsMm);
+    const result = confirmRoomAreaDimensions(sourceProject, areaId, lengthsMm);
     if (result.error) { setRoomDimensionsError(result.error); return; }
-    setProject(result.project);
+    if (additionalRoomDraft) {
+      const confirmedArea = result.project.room.areas?.find((item) => item.id === areaId);
+      if (!confirmedArea) return;
+      const nextAreaId = `room-${(project.room.areas?.length ?? 1) + 1}`;
+      const templateId = confirmedArea.templateId ?? result.project.room.templateId ?? null;
+      setProject((current) => addRoomFromContour(current, confirmedArea.contour, true, templateId));
+      setAdditionalRoomDraft(null);
+      setSelectedSurfaceId(`surface-floor-${nextAreaId}`);
+      setSelectedZoneId(null);
+      setSelectedOpeningId(null);
+      setSelectedPartitionId(null);
+      setSelectedObjectId(null);
+      setSelectedWallIndex(null);
+      setViewport(resetViewport());
+    } else {
+      setProject(result.project);
+    }
     setRoomDimensionsAreaId(null);
     setRoomDimensionsError(null);
     setLayers((current) => ({ ...current, floor: true, walls: true, dimensions: true }));
@@ -871,10 +937,10 @@ export function App() {
     setOpeningDialogSurfaceId(null);
   }
 
-  function applyTileColor(color: string) {
+  function applyTileColor(color: string, name?: string) {
     if (!activeSurfaceId || !activeZoneId) return;
     setHasRoomEdits(true);
-    setProject((current) => updateZoneTileColor(current, activeSurfaceId, activeZoneId, color));
+    setProject((current) => updateZoneTileColor(current, activeSurfaceId, activeZoneId, color, name));
   }
 
   function downloadProjectFile() {
@@ -913,6 +979,7 @@ export function App() {
     if (!surface) return;
     setManualZoneSurfaceId(surface.id);
     setManualZonePoints([]);
+    setManualZoneDrawingMode('orthogonal');
     setSelectedSurfaceId(surface.id);
     setSelectedZoneId(null);
     setLayers((current) => ({
@@ -926,8 +993,13 @@ export function App() {
   function addManualZonePoint(point: PointMm) {
     const surface = project.surfaces.find((item) => item.id === manualZoneSurfaceId);
     if (!surface) return;
-    if (manualZonePoints.length >= 2) return;
-    let nextPoint = { x: Math.round(point.x), y: Math.round(point.y) };
+    if (manualZonePoints.length >= CUSTOM_DRAW_MAX_POINTS) return;
+    const rawPoint = { x: Math.round(point.x), y: Math.round(point.y) };
+    let nextPoint = manualZonePoints.length
+      ? manualZoneDrawingMode === 'orthogonal'
+        ? constrainOrthogonalPoint(manualZonePoints, rawPoint)
+        : constrainFreePoint(rawPoint, manualZonePoints)
+      : rawPoint;
     if (surface.type === 'floor') {
       const areaId = surface.sourceRef?.split(':')[1];
       const contour = project.room.areas?.find((area) => area.id === areaId)?.contour ?? project.room.contour;
@@ -935,44 +1007,56 @@ export function App() {
         setDrawingError('Точки зоны должны находиться внутри выбранного пола.');
         return;
       }
-      const firstPoint = manualZonePoints[0];
-      if (firstPoint) {
-        const bounds = getBoundingBox([firstPoint, nextPoint]);
-        const corners = getRectZoneCorners(bounds);
-        if (corners.some((corner) => !pointInPolygonOrBoundary(corner, contour)) || corners.some((corner, index) => !isSegmentInsidePolygon(contour, corner, corners[(index + 1) % corners.length]))) {
-          setDrawingError('Прямоугольная зона должна полностью находиться внутри выбранного пола.');
-          return;
-        }
+      const previousPoint = manualZonePoints.at(-1);
+      if (previousPoint && !isSegmentInsidePolygon(contour, previousPoint, nextPoint)) {
+        setDrawingError('Линия зоны должна полностью находиться внутри выбранного пола.');
+        return;
       }
     } else {
       nextPoint = { x: Math.max(0, Math.min(surface.widthMm, nextPoint.x)), y: Math.max(0, Math.min(surface.heightMm, nextPoint.y)) };
     }
-    setManualZonePoints((current) => [...current, nextPoint].slice(-2));
+    const error = manualZonePoints.length ? validateDraftPoint(manualZonePoints, nextPoint) : null;
+    if (error) {
+      setDrawingError(error);
+      return;
+    }
+    setManualZonePoints((current) => [...current, nextPoint]);
+    setDrawingError(null);
+  }
+
+  function undoManualZonePoint() {
+    setManualZonePoints((current) => current.slice(0, -1));
     setDrawingError(null);
   }
 
   function finishManualZone() {
     const surface = project.surfaces.find((item) => item.id === manualZoneSurfaceId);
     if (!surface) return;
-    if (manualZonePoints.length < 2) {
-      setDrawingError(`Для зоны ${surface.type === 'floor' ? 'пола' : 'стены'} укажите два противоположных угла.`);
+    if (manualZonePoints.length < 3) {
+      setDrawingError(`Для зоны ${surface.type === 'floor' ? 'пола' : 'стены'} укажите минимум три точки.`);
       return;
     }
-    const bounds = getBoundingBox(manualZonePoints);
-    if (bounds.width < 100 || bounds.height < 100) {
-      setDrawingError('Ширина и высота зоны должны быть не меньше 100 мм.');
+    const hasDiagonal = manualZonePoints.some((point, index) => {
+      const next = manualZonePoints[index + 1];
+      return next ? point.x !== next.x && point.y !== next.y : false;
+    });
+    const contourPoints = hasDiagonal ? buildClosedContour(manualZonePoints) : buildClosedOrthogonalContour(manualZonePoints);
+    if (!contourPoints || !validateContour(contourPoints).ok) {
+      setDrawingError('Контур зоны нельзя замкнуть. Проверьте пересечения и длины сторон.');
       return;
     }
     if (surface.type === 'floor') {
       const areaId = surface.sourceRef?.split(':')[1];
       const contour = project.room.areas?.find((area) => area.id === areaId)?.contour ?? project.room.contour;
-      const corners = getRectZoneCorners(bounds);
-      if (corners.some((corner) => !pointInPolygonOrBoundary(corner, contour)) || corners.some((corner, index) => !isSegmentInsidePolygon(contour, corner, corners[(index + 1) % corners.length]))) {
-        setDrawingError('Прямоугольная зона должна полностью находиться внутри выбранного пола.');
+      if (contourPoints.some((point) => !pointInPolygonOrBoundary(point, contour)) || contourPoints.some((point, index) => !isSegmentInsidePolygon(contour, point, contourPoints[(index + 1) % contourPoints.length]))) {
+        setDrawingError('Нарисованная зона должна полностью находиться внутри выбранного пола.');
         return;
       }
+    } else if (contourPoints.some((point) => point.x < 0 || point.y < 0 || point.x > surface.widthMm || point.y > surface.heightMm)) {
+      setDrawingError('Нарисованная зона должна полностью находиться внутри выбранной стены.');
+      return;
     }
-    const result = addManualZone(project, surface.id, manualZonePoints);
+    const result = addManualZone(project, surface.id, contourPoints);
     if (!result.zone) return;
     setProject(result.project);
     setHasRoomEdits(true);
@@ -1003,6 +1087,7 @@ export function App() {
     setDraftContour([]);
     setDrawingError(null);
     setDrawingMode('idle');
+    setAdditionalRoomDraft(null);
     setCustomTileDialogOpen(false);
     setCustomTileError(null);
     setHasRoomEdits(false);
@@ -1023,6 +1108,15 @@ export function App() {
     setHasRoomEdits(true);
     if (action.type === 'delete-opening') { setProject((current) => deleteOpening(current, action.id)); setSelectedOpeningId(null); return; }
     if (action.type === 'delete-partition') { setProject((current) => deletePartition(current, action.id)); setSelectedPartitionId(null); return; }
+    if (action.type === 'delete-room-area') {
+      setProject((current) => {
+        const result = deleteRoomArea(current, action.areaId);
+        if (result.error) setRoomActionMessage(result.error);
+        return result.project;
+      });
+      selectSurface(null);
+      return;
+    }
     if (action.type === 'delete-object') { setProject((current) => deleteRoomObject(current, action.id)); setSelectedObjectId(null); return; }
     setProject((current) => deleteZone(current, action.surfaceId, action.zoneId));
     setSelectedZoneId(null);
@@ -1071,10 +1165,10 @@ export function App() {
         </div>
       </header>
 
-      <main className="workspace">
+      <main className={sidePanelCollapsed ? 'workspace side-panel-collapsed' : 'workspace'}>
         <section className="canvas-area" aria-label="Рабочее поле">
           <WorkspaceCanvas
-            canCompleteDrawing={!draftWallStart && canCloseContour(draftContour)}
+            canCompleteDrawing={!draftWallStart && isExplicitlyClosedContour(draftContour)}
             draftContour={draftContour}
             draftWallStart={draftWallStart}
             drawingError={drawingError}
@@ -1088,6 +1182,7 @@ export function App() {
             hideFloorOpenings={activePanelTab === 'room' && activeSurface?.type === 'floor'}
             manualZonePoints={manualZonePoints}
             manualZoneSurfaceId={manualZoneSurfaceId}
+            manualZoneDrawingMode={manualZoneDrawingMode}
             partitionDrawingActive={partitionDrawingActive}
             partitionDraftStart={partitionDraftStart}
             onAddPartitionDraftPoint={addPartitionDraftPoint}
@@ -1104,8 +1199,10 @@ export function App() {
             onLayoutEdgeOffsetChange={setLayoutEdgeOffset}
             onDeleteOpening={deleteSurfaceOpening}
             onDeletePartition={deleteSurfacePartition}
+            onDeleteRoomArea={deleteFloorArea}
             onMoveOpening={moveSurfaceOpening}
             onMovePartition={moveSurfacePartition}
+            onChangePartitionLength={changePartitionLength}
             onMoveObject={moveSurfaceObject}
             onMoveObjectOnWall={moveSurfaceObjectOnWall}
             onResizeOpening={resizeSurfaceOpening}
@@ -1129,7 +1226,7 @@ export function App() {
             onViewportChange={setViewport}
             onZoneShapeChange={changeZoneShape}
             onZonePolygonChange={changeZonePolygonPoints}
-            project={project}
+            project={additionalRoomDraft ?? project}
             relatedZoneWallIds={activeZone?.relatedSurfaceIds ?? []}
             selectedSurfaceId={selectedSurfaceId}
             selectedOpeningId={selectedOpeningId}
@@ -1143,12 +1240,24 @@ export function App() {
             activeTileColor={activeTileMaterial?.swatch.type === 'color' ? activeTileMaterial.swatch.value : '#F2EBF9'}
             canColorTile={Boolean(activeSurfaceId && activeZoneId)}
             onTileColorChange={applyTileColor}
+            tileMaterials={project.materials}
+            showOpeningNames={Boolean(connectionPrompt)}
             viewport={viewport}
           />
           {roomActionMessage ? <div className="room-action-message" role="status">{roomActionMessage}</div> : null}
         </section>
 
-        <aside className="side-panel" aria-label="Панель текущего шага">
+        <aside className={sidePanelCollapsed ? 'side-panel collapsed' : 'side-panel'} aria-label="Панель текущего шага">
+          <button
+            type="button"
+            className="side-panel-toggle"
+            aria-expanded={!sidePanelCollapsed}
+            aria-label={sidePanelCollapsed ? 'Открыть правую панель' : 'Скрыть правую панель'}
+            title={sidePanelCollapsed ? 'Открыть панель' : 'Скрыть панель'}
+            onClick={() => setSidePanelCollapsed((current) => !current)}
+          >
+            {sidePanelCollapsed ? <ArrowLeft size={16} /> : <ArrowRight size={16} />}
+          </button>
           <div className="panel-tabs">
             <button type="button" className={activePanelTab === 'room' ? 'active' : ''} onClick={() => setActivePanelTab('room')}>Помещение</button>
             <button type="button" className={activePanelTab === 'tile' ? 'active' : ''} onClick={() => setActivePanelTab('tile')}>Плитка</button>
@@ -1217,11 +1326,13 @@ export function App() {
           ) : null}
 
           {activePanelTab === 'room' ? (
-            <section className="panel-card panel-section">
-              <h1>Форма помещения</h1>
-              <TemplateGrid onSelect={applyTemplate} selectedTemplateId={selectedTemplateId} />
+            <>
+              <section className="panel-card panel-section">
+                <h1>Форма помещения</h1>
+                <TemplateGrid onSelect={applyTemplate} selectedTemplateId={selectedTemplateId} />
+              </section>
               <RoomTools
-                activeSurface={activeSurface}
+                disabled={drawingMode !== 'idle' || Boolean(roomDimensionsAreaId)}
                 onAddDoor={() => requestOpening('door')}
                 onAddPassage={() => requestOpening('passage')}
                 onAddPartition={createPartition}
@@ -1230,7 +1341,7 @@ export function App() {
                 onAddRoom={addRoom}
                 project={project}
               />
-            </section>
+            </>
           ) : null}
 
           {activePanelTab === 'objects' ? (
@@ -1256,9 +1367,12 @@ export function App() {
               onSelectZone={selectZone}
               manualDrawingActive={Boolean(manualZoneSurfaceId)}
               manualPointCount={manualZonePoints.length}
+              manualDrawingMode={manualZoneDrawingMode}
               onCancelManualZone={cancelManualZone}
               onFinishManualZone={finishManualZone}
               onStartManualZone={startManualZone}
+              onDrawingModeChange={setManualZoneDrawingMode}
+              onUndoManualZonePoint={undoManualZonePoint}
               project={project}
               selectedSurfaceId={selectedSurfaceId}
               selectedZoneId={selectedZoneId}
@@ -1266,6 +1380,7 @@ export function App() {
           ) : null}
 
           {contourStatus.ok ? null : <p className="error-text">{contourStatus.message}</p>}
+          <PromoCard />
         </aside>
       </main>
 
@@ -1418,23 +1533,34 @@ function OpeningConnectionDialog({ candidates, onCancel, onSelect }: { candidate
 }
 
 function HelpDialog({ onClose }: { onClose: () => void }) {
-  const sections = [
-    ['Начало работы', 'Выберите готовую форму помещения или нарисуйте собственный контур. У готовой формы нажимайте на подписи стен, вводите размеры в миллиметрах и затем сохраните их.'],
-    ['Плитка', 'Выберите поверхность на схеме, затем задайте формат, укладку, точку старта, движение раскладки и цвет плитки.'],
-    ['Помещение', 'Добавляйте помещения, двери, проходы, окна и перегородки. Перед добавлением проёма обязательно выберите нужную стену.'],
-    ['Зоны', 'Выберите пол или стену, нарисуйте зону и назначьте ей отдельную плитку. Зоны можно переименовывать, изменять и удалять.'],
-    ['Объекты', 'Создавайте объекты с точными размерами и указывайте, должна ли отсутствовать плитка под объектом или за ним.'],
-    ['Размеры', 'Переключатель над схемой показывает размеры помещения, отступы плитки или расстояния между объектами. Значения появляются только у выбранного элемента.'],
-    ['Навигация', 'Сетка очищает выбор при клике по свободному месту. Кнопки «−», «+» и «Вписать» управляют масштабом. Стрелки вверху отменяют и возвращают до 10 действий.'],
-    ['Сохранение', 'Кнопка «Сохранить» скачивает файл .vilray. Кнопка «Открыть» загружает такой файл и восстанавливает проект для продолжения работы.'],
-    ['Расчёт', 'Кнопка «Расчёт» формирует сводку по плитке, количеству элементов и необходимому запасу.'],
+  const sections: Array<[string, string]> = [
+    ['Как начать проект?', 'Выберите шаблон или режим «Нарисовать самому». У шаблона растяните стены либо нажмите на подписи размеров, затем обязательно сохраните форму.'],
+    ['Как добавить помещение?', 'Откройте вкладку «Помещение» и нажмите «Добавить помещение». Новое помещение можно перемещать и соединять с существующим через свободные двери или проходы.'],
+    ['Как выбрать плитку?', 'Сначала нажмите на пол, стену или зону. После этого выберите формат, вариант укладки, смещение, точку старта и цвет.'],
+    ['Как работают зоны?', 'Выберите поверхность, включите рисование зоны и поставьте точки контура. Доступны прямые углы и диагонали. После сохранения геометрия ручной зоны фиксируется.'],
+    ['Как учитывать объекты?', 'На вкладке «Объекты» задайте точные размеры. Галочки позволяют отдельно исключить плитку под объектом на полу и за ним на соприкасающихся стенах.'],
+    ['Где посмотреть размеры?', 'В верхней плашке схемы включите размеры и выберите режим: размеры помещения, отступы плитки либо расстояния между объектами. Подписи показываются у выбранного элемента.'],
+    ['Как отменить действие?', 'Кнопки со стрелками в верхней панели отменяют и возвращают до десяти последних действий проекта.'],
+    ['Как сохранить работу?', 'Кнопка «Сохранить» скачивает файл .vilray. Позже нажмите «Открыть» и выберите этот файл, чтобы продолжить работу.'],
+    ['Как считается стоимость?', 'Откройте «Расчёт», проверьте общую сводку материалов и внесите цену за квадратный метр каждого варианта плитки. Итог пересчитается автоматически.'],
   ];
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [contactVisible, setContactVisible] = useState(false);
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="confirm-dialog help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title">
-        <header><div><h2 id="help-title">Руководство пользователя</h2><p>Краткая инструкция по основным возможностям редактора.</p></div><button type="button" aria-label="Закрыть" onClick={onClose}>×</button></header>
-        <div className="help-sections">{sections.map(([title, text], index) => <details key={title} open={index === 0}><summary>{title}</summary><p>{text}</p></details>)}</div>
-        <footer>Остались вопросы? Напишите нам: <a href="mailto:ulyana.karaseva.06@gmail.com">ulyana.karaseva.06@gmail.com</a></footer>
+    <div className="help-page-backdrop" role="presentation">
+      <section className="help-page" role="dialog" aria-modal="true" aria-labelledby="help-title">
+        <header><div><h2 id="help-title">Помощь и руководство</h2><p>Пошаговые ответы по работе с проектом.</p></div><button type="button" aria-label="Закрыть" onClick={onClose}>×</button></header>
+        <div className="help-page-body">
+          <nav className="help-question-list" aria-label="Вопросы по работе с сайтом">
+            {sections.map(([title], index) => <button key={title} type="button" className={selectedIndex === index ? 'active' : ''} onClick={() => setSelectedIndex(index)}>{title}</button>)}
+            <button type="button" className="help-contact-button" onClick={() => setContactVisible((current) => !current)}>Связаться</button>
+            {contactVisible ? <a href="mailto:ulyana.karaseva.06@gmail.com">ulyana.karaseva.06@gmail.com</a> : null}
+          </nav>
+          <main className="help-content">
+            <section className="help-answer"><h3>{sections[selectedIndex][0]}</h3><p>{sections[selectedIndex][1]}</p></section>
+            <section className="help-video-placeholder" aria-label="Место для обучающего видео"><span>Обучающее видео</span><p>Видеоинструкция появится здесь.</p></section>
+          </main>
+        </div>
       </section>
     </div>
   );
@@ -1458,7 +1584,7 @@ function OpeningSizeDialog({ kind, maxHeightMm, maxWidthMm, onCancel, onSubmit }
         onSubmit({ widthMm: Number(width), ...(kind === 'passage' ? {} : { heightMm: Number(height) }) });
       }}>
         <h2>{title}</h2>
-        <p>После сохранения размер фиксируется. Элемент можно перемещать вдоль выбранной стены.</p>
+        <p>После сохранения размер фиксируется.</p>
         <div className="opening-size-fields">
           <label>Ширина, мм<input type="number" min={Math.min(300, maxWidthMm)} max={maxWidthMm} step={1} value={width} onChange={(event) => setWidth(event.target.value)} required /></label>
           {kind !== 'passage' ? <label>Высота, мм<input type="number" min={Math.min(300, maxHeightMm)} max={maxHeightMm} step={1} value={height} onChange={(event) => setHeight(event.target.value)} required /></label> : null}
@@ -1724,6 +1850,7 @@ interface WorkspaceCanvasProps {
   hideFloorOpenings: boolean;
   manualZonePoints: PointMm[];
   manualZoneSurfaceId: string | null;
+  manualZoneDrawingMode: CustomDrawingMode;
   partitionDrawingActive: boolean;
   partitionDraftStart: PointMm | null;
   onAddPartitionDraftPoint: (point: PointMm) => void;
@@ -1742,10 +1869,12 @@ interface WorkspaceCanvasProps {
   onEditObject: (objectId: string) => void;
   onDeleteOpening: (openingId: string) => void;
   onDeletePartition: (partitionId: string) => void;
+  onDeleteRoomArea: (areaId: string) => void;
   onMoveObject: (objectId: string, xMm: number, yMm: number) => void;
   onMoveObjectOnWall: (objectId: string, surfaceId: string, offsetMm: number, elevationMm: number) => void;
   onMoveOpening: (openingId: string, xMm: number, yMm?: number) => void;
-  onMovePartition: (partitionId: string, deltaXmm: number, deltaYmm: number) => void;
+  onMovePartition: (partitionId: string, start: PointMm, end: PointMm) => void;
+  onChangePartitionLength: (partitionId: string, value: string) => void;
   onResizeOpening: (openingId: string, patch: Pick<Opening, 'xMm' | 'yMm' | 'widthMm' | 'heightMm'>) => void;
   onMoveWall: (areaId: string, index: number, deltaMm: number) => void;
   onMoveRoomArea: (areaId: string, deltaXmm: number, deltaYmm: number) => void;
@@ -1770,7 +1899,9 @@ interface WorkspaceCanvasProps {
   onZonePolygonChange: (surfaceId: string, zoneId: string, points: PointMm[]) => void;
   activeTileColor: string;
   canColorTile: boolean;
-  onTileColorChange: (color: string) => void;
+  onTileColorChange: (color: string, name?: string) => void;
+  tileMaterials: TileMaterial[];
+  showOpeningNames: boolean;
   project: TileProject;
   relatedZoneWallIds: string[];
   selectedSurfaceId: string | null;
@@ -1797,6 +1928,7 @@ function WorkspaceCanvas({
   hideFloorOpenings,
   manualZonePoints,
   manualZoneSurfaceId,
+  manualZoneDrawingMode,
   partitionDrawingActive,
   partitionDraftStart,
   onAddPartitionDraftPoint,
@@ -1815,10 +1947,12 @@ function WorkspaceCanvas({
   onEditObject,
   onDeleteOpening,
   onDeletePartition,
+  onDeleteRoomArea,
   onMoveObject,
   onMoveOpening,
   onMoveObjectOnWall,
   onMovePartition,
+  onChangePartitionLength,
   onResizeOpening,
   onMoveWall,
   onMoveRoomArea,
@@ -1844,6 +1978,8 @@ function WorkspaceCanvas({
   activeTileColor,
   canColorTile,
   onTileColorChange,
+  tileMaterials,
+  showOpeningNames,
   project,
   relatedZoneWallIds,
   selectedSurfaceId,
@@ -1866,7 +2002,14 @@ function WorkspaceCanvas({
   const planView = useMemo(() => getPlanView(project.room.contour), [project.room.contour]);
   const wallLayout = useMemo(() => getWallLayout(project, planView, collapsedWallAreaIds), [project, planView, collapsedWallAreaIds]);
   const wallFrames = wallLayout.frames;
+  const sectionBlocks = useMemo(() => getCanvasSectionBlocks(project, planView, wallLayout), [project, planView, wallLayout]);
   const activeEdit = editTarget ? getInlineEdit(project, editTarget, planView, wallFrames, viewport) : null;
+  const dimensionArea = dimensionEntryAreaId ? project.room.areas?.find((area) => area.id === dimensionEntryAreaId) : null;
+  const dimensionBox = dimensionArea ? getBoundingBox(dimensionArea.contour) : null;
+  const dimensionControlStyle = dimensionBox ? {
+    left: Math.max(270, Math.min(size.width - 230, Math.round(viewport.x + (planView.x(dimensionBox.maxX) + 150) * viewport.zoom))),
+    top: Math.max(96, Math.min(size.height - 118, Math.round(viewport.y + planView.y(dimensionBox.minY + dimensionBox.height / 2) * viewport.zoom))),
+  } : undefined;
 
   useEffect(() => {
     const holder = holderRef.current;
@@ -1943,18 +2086,26 @@ function WorkspaceCanvas({
         const areaId = surface.sourceRef?.split(':')[1];
         const contour = project.room.areas?.find((area) => area.id === areaId)?.contour ?? project.room.contour;
         const roundedPoint = { x: Math.round(point.x), y: Math.round(point.y) };
-        const firstPoint = manualZonePoints[0];
-        const previewIsInside = pointInPolygonOrBoundary(roundedPoint, contour) && (!firstPoint || (() => {
-          const corners = getRectZoneCorners(getBoundingBox([firstPoint, roundedPoint]));
-          return corners.every((corner) => pointInPolygonOrBoundary(corner, contour)) && corners.every((corner, index) => isSegmentInsidePolygon(contour, corner, corners[(index + 1) % corners.length]));
-        })());
-        setDraftPointer(previewIsInside ? roundedPoint : null);
+        const constrainedPoint = manualZonePoints.length
+          ? manualZoneDrawingMode === 'orthogonal'
+            ? constrainOrthogonalPoint(manualZonePoints, roundedPoint)
+            : constrainFreePoint(roundedPoint, manualZonePoints)
+          : roundedPoint;
+        const previousPoint = manualZonePoints.at(-1);
+        const previewIsInside = pointInPolygonOrBoundary(constrainedPoint, contour)
+          && (!previousPoint || isSegmentInsidePolygon(contour, previousPoint, constrainedPoint));
+        setDraftPointer(previewIsInside ? constrainedPoint : null);
       } else {
         const frame = wallFrames.find((item) => item.id === surface.id);
         if (!frame) return;
         const localX = (pointer.x - viewport.x) / viewport.zoom;
         const localY = (pointer.y - viewport.y) / viewport.zoom;
-        const point = { x: canvasToMm(localX - frame.x), y: canvasToMm(localY - frame.y) };
+        const rawPoint = { x: canvasToMm(localX - frame.x), y: canvasToMm(localY - frame.y) };
+        const point = manualZonePoints.length
+          ? manualZoneDrawingMode === 'orthogonal'
+            ? constrainOrthogonalPoint(manualZonePoints, rawPoint)
+            : constrainFreePoint(rawPoint, manualZonePoints)
+          : rawPoint;
         setDraftPointer(point.x >= 0 && point.y >= 0 && point.x <= surface.widthMm && point.y <= surface.heightMm ? point : null);
       }
       return;
@@ -1996,7 +2147,7 @@ function WorkspaceCanvas({
     const dx = pointer.x - panRef.current.x;
     const dy = pointer.y - panRef.current.y;
     panRef.current = { active: true, x: pointer.x, y: pointer.y };
-    onViewportChange(panViewport(viewport, dx, dy));
+    onViewportChange(constrainCanvasViewport(panViewport(viewport, dx, dy)));
   }
 
   function stopPan() {
@@ -2016,6 +2167,8 @@ function WorkspaceCanvas({
       onLayoutEdgeOffsetChange(activeEdit.target.surfaceId, activeEdit.target.zoneId, activeEdit.target.edge, parsed);
     } else if (activeEdit.target.type === 'wall-height') {
       onChangeHeight(activeEdit.target.areaId, String(parsed));
+    } else if (activeEdit.target.type === 'partition-length') {
+      onChangePartitionLength(activeEdit.target.partitionId, String(parsed));
     } else {
       onSubmitSegment(activeEdit.target, String(parsed));
     }
@@ -2047,21 +2200,27 @@ function WorkspaceCanvas({
         onTouchEnd={stopPan}
         onWheel={(event) => {
           event.evt.preventDefault();
-          onViewportChange({ ...viewport, zoom: clampZoom(viewport.zoom + (event.evt.deltaY > 0 ? -0.08 : 0.08)) });
+          onViewportChange(changeCanvasZoom(viewport, viewport.zoom + (event.evt.deltaY > 0 ? -0.08 : 0.08)));
         }}
       >
         <Layer>
           <Rect name="pan-bg" x={0} y={0} width={size.width} height={size.height} fill="#FBFBFC" />
+          <Group x={viewport.x} y={viewport.y} scaleX={viewport.zoom} scaleY={viewport.zoom} listening={false}>
+            {drawingMode === 'idle' && layers.floor ? <Rect {...sectionBlocks.floor} fill="rgba(143, 104, 178, 0.055)" stroke="rgba(109, 72, 142, 0.34)" strokeWidth={1.25} cornerRadius={12} /> : null}
+            {drawingMode === 'idle' && layers.walls && !dimensionEntryAreaId ? <Rect {...sectionBlocks.walls} fill="rgba(143, 104, 178, 0.055)" stroke="rgba(109, 72, 142, 0.34)" strokeWidth={1.25} cornerRadius={12} /> : null}
+          </Group>
           {layers.grid ? <Grid width={size.width} height={size.height} viewport={viewport} /> : null}
           <Group x={viewport.x} y={viewport.y} scaleX={viewport.zoom} scaleY={viewport.zoom}>
             {drawingMode === 'custom-room' ? <DraftContourLayer canResizeLastPoint={!draftWallStart && draftContour.length >= 2} mode={customDrawingMode} onLastPointMove={onMoveLastDraftPoint} points={draftContour} previewPoint={draftPointer} previewStart={draftWallStart ?? (drawingToolArmed ? draftContour[draftContour.length - 1] ?? null : null)} /> : null}
             {drawingMode === 'custom-room-review' ? <DraftReviewLayer onPointMove={onMoveDraftReviewPoint} onWallMove={onMoveDraftReviewWall} points={draftContour} /> : null}
             {drawingMode === 'idle' && layers.floor ? (
               <FloorLayer
+                block={sectionBlocks.floor}
                 dimensionEntryAreaId={dimensionEntryAreaId}
                 dimensionsVisible={layers.dimensions && measurementMode === 'room' && (Boolean(selectedSurfaceId) || Boolean(dimensionEntryAreaId))}
                 measurementMode={layers.dimensions ? measurementMode : null}
                 hideOpenings={hideFloorOpenings}
+                showOpeningNames={showOpeningNames}
                 onEditSegment={onEditSegment}
                 onMoveWall={onMoveWall}
                 onMoveRoomArea={onMoveRoomArea}
@@ -2070,6 +2229,7 @@ function WorkspaceCanvas({
                 onMoveObject={onMoveObject}
                 onSelectObject={onSelectObject}
                 onDeletePartition={onDeletePartition}
+                onDeleteRoomArea={onDeleteRoomArea}
                 onMovePartition={onMovePartition}
                 onResetPartition={onResetPartition}
                 onSelectPartition={onSelectPartition}
@@ -2094,6 +2254,7 @@ function WorkspaceCanvas({
             {drawingMode === 'idle' && partitionDrawingActive ? <PartitionDraftLayer end={partitionDraftStart ? draftPointer : null} start={partitionDraftStart} view={planView} /> : null}
             {drawingMode === 'idle' && layers.walls && !dimensionEntryAreaId ? (
               <WallsLayer
+                block={sectionBlocks.walls}
                 dimensionsVisible={layers.dimensions && measurementMode === 'room' && Boolean(selectedSurfaceId)}
                 tileOffsetsVisible={layers.dimensions && measurementMode === 'tile' && Boolean(selectedSurfaceId)}
                 frames={wallFrames}
@@ -2129,6 +2290,7 @@ function WorkspaceCanvas({
                     return next;
                   });
                 }}
+                showOpeningNames={showOpeningNames}
               />
             ) : null}
             {manualZoneSurfaceId ? (
@@ -2141,7 +2303,7 @@ function WorkspaceCanvas({
                 fill="rgba(255, 255, 255, 0.001)"
               />
             ) : null}
-            {manualZoneSurfaceId ? <ManualZoneDraftLayer frames={wallFrames} points={manualZonePoints} previewPoint={draftPointer} surface={project.surfaces.find((item) => item.id === manualZoneSurfaceId)} view={planView} /> : null}
+            {manualZoneSurfaceId ? <ManualZoneDraftLayer frames={wallFrames} mode={manualZoneDrawingMode} points={manualZonePoints} previewPoint={draftPointer} surface={project.surfaces.find((item) => item.id === manualZoneSurfaceId)} view={planView} /> : null}
           </Group>
         </Layer>
       </Stage>
@@ -2166,12 +2328,12 @@ function WorkspaceCanvas({
         </select>
       </div>
 
-      <div className="canvas-toolbar">
-        <button type="button" aria-label="Уменьшить" onClick={() => onViewportChange({ ...viewport, zoom: clampZoom(viewport.zoom - 0.15) })}>
+      <div className={drawingMode === 'custom-room' || drawingMode === 'custom-room-review' ? 'canvas-toolbar canvas-toolbar-drawing' : 'canvas-toolbar'}>
+        <button type="button" aria-label="Уменьшить" onClick={() => onViewportChange(changeCanvasZoom(viewport, viewport.zoom - 0.15))}>
           <Minus size={16} />
         </button>
         <span>{Math.round(viewport.zoom * 100)}%</span>
-        <button type="button" aria-label="Увеличить" onClick={() => onViewportChange({ ...viewport, zoom: clampZoom(viewport.zoom + 0.15) })}>
+        <button type="button" aria-label="Увеличить" onClick={() => onViewportChange(changeCanvasZoom(viewport, viewport.zoom + 0.15))}>
           <Plus size={16} />
         </button>
         <button type="button" aria-label="Вписать" onClick={() => onViewportChange(resetViewport())}>
@@ -2179,12 +2341,16 @@ function WorkspaceCanvas({
         </button>
       </div>
 
-      <TileColorPicker activeColor={activeTileColor} canApply={canColorTile} customOpen={customPaletteOpen} onCustomToggle={() => setCustomPaletteOpen((current) => !current)} onSelect={onTileColorChange} />
+      {partitionDrawingActive && !partitionDraftStart ? (
+        <div className="partition-drawing-hint">Кликните у стены, чтобы<br />начать перегородку</div>
+      ) : null}
 
-      {dimensionEntryAreaId ? (
-        <div className="room-dimension-controls">
-          <div><strong>Размеры готового помещения</strong><span>Нажмите на число у стены, введите длину в миллиметрах и подтвердите каждое изменение.</span>{dimensionEntryError ? <em>{dimensionEntryError}</em> : null}</div>
-          <button type="button" onClick={onSaveRoomDimensions}>Сохранить размеры</button>
+      <TileColorPicker activeColor={activeTileColor} canApply={canColorTile} customOpen={customPaletteOpen} materials={tileMaterials} onCustomToggle={() => setCustomPaletteOpen((current) => !current)} onSelect={onTileColorChange} />
+
+      {dimensionEntryAreaId && drawingMode === 'idle' ? (
+        <div className="room-dimension-controls" style={dimensionControlStyle}>
+          <div><strong>Сохранить форму</strong><span>Проверьте размеры стен. После сохранения форму изменить нельзя.</span>{dimensionEntryError ? <em>{dimensionEntryError}</em> : null}</div>
+          <button type="button" onClick={onSaveRoomDimensions}>Сохранить</button>
         </div>
       ) : null}
 
@@ -2194,7 +2360,7 @@ function WorkspaceCanvas({
             <button type="button" className={drawingToolArmed && customDrawingMode === 'orthogonal' ? 'active' : ''} onClick={() => onCustomDrawingModeChange('orthogonal')}>Нарисовать стену</button>
             <button type="button" className={drawingToolArmed && customDrawingMode === 'free' ? 'active' : ''} onClick={() => onCustomDrawingModeChange('free')}>Стена под углом</button>
           </div>
-          <button type="button" className="drawing-complete" onClick={onCompleteDrawing} disabled={!canCompleteDrawing}>
+          <button type="button" className={canCompleteDrawing ? 'drawing-complete ready' : 'drawing-complete'} onClick={onCompleteDrawing} disabled={!canCompleteDrawing}>
             Завершить построение
           </button>
           <button type="button" onClick={onUndoDraftPoint} disabled={draftContour.length === 0 && !draftWallStart}>
@@ -2481,7 +2647,7 @@ function DraftReviewLayer({ onPointMove, onWallMove, points }: { onPointMove: (i
 }
 
 function PartitionDraftLayer({ end, start, view }: { end: PointMm | null; start: PointMm | null; view: PlanViewTransform }) {
-  if (!start) return <Text x={54} y={92} text="Кликните у стены, чтобы начать перегородку" fill="#6F4F93" fontSize={14} />;
+  if (!start) return null;
   const startCanvas = { x: view.x(start.x), y: view.y(start.y) };
   const endCanvas = end ? { x: view.x(end.x), y: view.y(end.y) } : null;
   return (
@@ -2498,84 +2664,29 @@ function PartitionDraftLayer({ end, start, view }: { end: PointMm | null; start:
   );
 }
 
-function ManualZoneDraftLayer({ frames, points, previewPoint, surface, view }: { frames: WallFrame[]; points: PointMm[]; previewPoint: PointMm | null; surface: TileProject['surfaces'][number] | undefined; view: PlanViewTransform }) {
+function ManualZoneDraftLayer({ frames, mode, points, previewPoint, surface, view }: { frames: WallFrame[]; mode: CustomDrawingMode; points: PointMm[]; previewPoint: PointMm | null; surface: TileProject['surfaces'][number] | undefined; view: PlanViewTransform }) {
   if (!surface) return null;
   const frame = surface.type === 'wall' ? frames.find((item) => item.id === surface.id) : null;
   const toCanvas = (point: PointMm) => frame
     ? { x: frame.x + mmToCanvas(point.x), y: frame.y + mmToCanvas(point.y) }
     : { x: view.x(point.x), y: view.y(point.y) };
   const canvasPoints = points.map(toCanvas);
-  if (!canvasPoints.length) {
-    const previewCanvas = previewPoint ? toCanvas(previewPoint) : null;
-    return (
-      <Group listening={false}>
-        <Text x={54} y={92} text="Поставьте точки ручной зоны" fill="#6F4F93" fontSize={14} />
-        {previewCanvas ? <Circle x={previewCanvas.x} y={previewCanvas.y} radius={6} fill="#7B43AF" stroke="#FFFFFF" strokeWidth={2} shadowColor="rgba(111, 79, 147, 0.38)" shadowBlur={8} /> : null}
-      </Group>
-    );
-  }
-
-  if (surface.type === 'wall' && frame) {
-    const secondPoint = points[1] ?? previewPoint;
-    const firstPoint = points[0];
-    const bounds = secondPoint ? getBoundingBox([firstPoint, secondPoint]) : null;
-    return (
-      <Group listening={false}>
-        {bounds ? (
-          <>
-            <Rect
-              x={frame.x + mmToCanvas(bounds.minX)}
-              y={frame.y + mmToCanvas(bounds.minY)}
-              width={mmToCanvas(bounds.width)}
-              height={mmToCanvas(bounds.height)}
-              fill="rgba(139, 83, 184, 0.20)"
-              stroke="#7B43AF"
-              strokeWidth={3}
-              dash={[8, 5]}
-            />
-            <ZoneBoundsMeasurements
-              bounds={bounds}
-              surfaceBounds={{ minX: 0, minY: 0, maxX: surface.widthMm, maxY: surface.heightMm, width: surface.widthMm, height: surface.heightMm }}
-              toCanvas={toCanvas}
-            />
-          </>
-        ) : null}
-        {canvasPoints.map((point, index) => <Circle key={`manual-zone-point-${index}`} x={point.x} y={point.y} radius={6} fill="#7B43AF" stroke="#FFFFFF" strokeWidth={2} />)}
-        {previewPoint && points.length === 1 ? <Circle x={toCanvas(previewPoint).x} y={toCanvas(previewPoint).y} radius={5} fill="#FFFFFF" stroke="#7B43AF" strokeWidth={2} /> : null}
-      </Group>
-    );
-  }
-
-  const secondPoint = points[1] ?? previewPoint;
-  const bounds = secondPoint ? getBoundingBox([points[0], secondPoint]) : null;
-  const surfaceContour = surface.zones[0]?.shape.type === 'polygon' ? surface.zones[0].shape.points : [];
-  const topLeft = bounds ? toCanvas({ x: bounds.minX, y: bounds.minY }) : null;
-  const bottomRight = bounds ? toCanvas({ x: bounds.maxX, y: bounds.maxY }) : null;
+  const previewCanvas = previewPoint ? toCanvas(previewPoint) : null;
+  const displayPoints = previewPoint ? [...canvasPoints, previewCanvas!] : canvasPoints;
+  const linePoints = displayPoints.flatMap((point) => [point.x, point.y]);
   return (
     <Group listening={false}>
-      {bounds && topLeft && bottomRight ? (
-        <>
-          <Rect
-            x={topLeft.x}
-            y={topLeft.y}
-            width={bottomRight.x - topLeft.x}
-            height={bottomRight.y - topLeft.y}
-            fill="rgba(139, 83, 184, 0.20)"
-            stroke="#7B43AF"
-            strokeWidth={3}
-            dash={[8, 5]}
-          />
-          {surfaceContour.length ? (
-            <ZoneBoundsMeasurements
-              bounds={bounds}
-              surfaceBounds={getFloorZoneDistanceBounds(surfaceContour, bounds)}
-              toCanvas={toCanvas}
-            />
-          ) : null}
-        </>
-      ) : null}
+      <Text x={54} y={92} text={mode === 'orthogonal' ? 'Зона: прямые углы' : 'Зона: свободные диагонали'} fill="#6F4F93" fontSize={14} />
+      {displayPoints.length > 1 ? <Line points={linePoints} closed={false} fill={points.length >= 3 && !previewPoint ? 'rgba(139, 83, 184, 0.18)' : undefined} stroke="#7B43AF" strokeWidth={4} dash={previewPoint ? [9, 6] : undefined} lineCap="round" lineJoin="round" /> : null}
+      {points.slice(0, -1).map((point, index) => {
+        const next = points[index + 1];
+        const startCanvas = toCanvas(point);
+        const endCanvas = toCanvas(next);
+        return <DraftLengthLabel key={`manual-zone-length-${index}`} x={(startCanvas.x + endCanvas.x) / 2} y={getDraftLengthLabelY(startCanvas, endCanvas)} text={formatDraftLengthMm(point, next)} />;
+      })}
+      {previewPoint && points.length ? <DraftLengthLabel x={(canvasPoints.at(-1)!.x + previewCanvas!.x) / 2} y={getDraftLengthLabelY(canvasPoints.at(-1)!, previewCanvas!)} text={formatDraftLengthMm(points.at(-1)!, previewPoint)} /> : null}
       {canvasPoints.map((point, index) => <Circle key={`manual-zone-point-${index}`} x={point.x} y={point.y} radius={6} fill="#7B43AF" stroke="#FFFFFF" strokeWidth={2} />)}
-      {previewPoint && points.length === 1 ? <Circle x={toCanvas(previewPoint).x} y={toCanvas(previewPoint).y} radius={5} fill="#FFFFFF" stroke="#7B43AF" strokeWidth={2} /> : null}
+      {previewCanvas ? <Circle x={previewCanvas.x} y={previewCanvas.y} radius={6} fill="#7B43AF" stroke="#FFFFFF" strokeWidth={2} shadowColor="rgba(111, 79, 147, 0.38)" shadowBlur={8} /> : null}
     </Group>
   );
 }
@@ -2589,17 +2700,37 @@ function DraftLengthLabel({ error = false, text, x, y }: { error?: boolean; text
   );
 }
 
-function TileColorPicker({ activeColor, canApply, customOpen, onCustomToggle, onSelect }: { activeColor: string; canApply: boolean; customOpen: boolean; onCustomToggle: () => void; onSelect: (color: string) => void }) {
+function TileColorPicker({ activeColor, canApply, customOpen, materials, onCustomToggle, onSelect }: { activeColor: string; canApply: boolean; customOpen: boolean; materials: TileMaterial[]; onCustomToggle: () => void; onSelect: (color: string, name?: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [pendingColor, setPendingColor] = useState(activeColor);
+  const [name, setName] = useState('');
+  const savedColors = materials.filter((material, index, items) => material.swatch.type === 'color' && items.findIndex((candidate) => candidate.swatch.type === 'color' && candidate.swatch.value.toUpperCase() === material.swatch.value.toUpperCase() && candidate.name === material.name) === index);
+
+  useEffect(() => setPendingColor(activeColor), [activeColor]);
+
+  function applyPendingColor() {
+    if (!canApply) return;
+    onSelect(pendingColor, name.trim() || undefined);
+    setName('');
+    setOpen(false);
+  }
+
   return (
-    <div className="tile-color-picker">
-      <span>Цвет плитки</span>
-      <div className="tile-color-row">
-        {primaryPastelColors.map((color) => <button key={color} type="button" disabled={!canApply} className={activeColor.toUpperCase() === color ? 'active' : ''} style={{ background: color }} aria-label={`Цвет ${color}`} onClick={() => onSelect(color)} />)}
-        <button type="button" className="custom-color-button" disabled={!canApply} aria-expanded={customOpen} onClick={onCustomToggle}>Свой</button>
+    <details className="tile-color-picker" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary><span className="tile-color-chip" style={{ background: activeColor }} />Цвет плитки</summary>
+      <div className="tile-color-popover">
+        {savedColors.length ? <div className="saved-color-list">{savedColors.map((material) => <button key={material.id} type="button" disabled={!canApply} className={activeColor.toUpperCase() === material.swatch.value.toUpperCase() ? 'active' : ''} onClick={() => { onSelect(material.swatch.value, material.name); setOpen(false); }}><span style={{ background: material.swatch.value }} /><em>{material.name}</em></button>)}</div> : null}
+        <strong>Новый цвет</strong>
+        <div className="tile-color-row">
+          {primaryPastelColors.map((color) => <button key={color} type="button" disabled={!canApply} className={pendingColor.toUpperCase() === color ? 'active' : ''} style={{ background: color }} aria-label={`Цвет ${color}`} onClick={() => setPendingColor(color)} />)}
+          <button type="button" className="custom-color-button" disabled={!canApply} aria-expanded={customOpen} onClick={onCustomToggle}>Свой</button>
+        </div>
+        {customOpen ? <div className="extended-pastel-palette">{extendedPastelColors.map((color) => <button key={color} type="button" className={pendingColor.toUpperCase() === color ? 'active' : ''} style={{ background: color }} aria-label={`Свой цвет ${color}`} onClick={() => setPendingColor(color)} />)}</div> : null}
+        <label className="tile-color-name">Название<input type="text" maxLength={60} value={name} placeholder="Например, пудровый" onChange={(event) => setName(event.currentTarget.value)} /></label>
+        <button type="button" className="tile-color-apply" disabled={!canApply} onClick={applyPendingColor}>Применить цвет</button>
+        {!canApply ? <small>Выберите пол, стену или зону</small> : null}
       </div>
-      {customOpen ? <div className="extended-pastel-palette">{extendedPastelColors.map((color) => <button key={color} type="button" className={activeColor.toUpperCase() === color ? 'active' : ''} style={{ background: color }} aria-label={`Свой цвет ${color}`} onClick={() => onSelect(color)} />)}</div> : null}
-      {!canApply ? <small>Выберите пол, стену или зону</small> : null}
-    </div>
+    </details>
   );
 }
 
@@ -2715,22 +2846,30 @@ function formatDraftLengthMm(start: PointMm, end: PointMm) {
   return `${totalMm} мм`;
 }
 
+function getSelectedPartitionSide(project: TileProject, surfaceId: string | null, partitionId: string): 'a' | 'b' | null {
+  const sourceParts = project.surfaces.find((surface) => surface.id === surfaceId)?.sourceRef?.split(':') ?? [];
+  if (sourceParts[0] !== 'partition' || sourceParts[1] !== partitionId) return null;
+  return sourceParts[2] === 'a' || sourceParts[2] === 'b' ? sourceParts[2] : null;
+}
+
 function pointToCanvasPoint(point: PointMm) {
   return { x: PLAN_OFFSET_X + mmToCanvas(point.x), y: PLAN_OFFSET_Y + mmToCanvas(point.y) };
 }
 
 interface FloorLayerProps {
+  block: CanvasSectionBlock;
   dimensionEntryAreaId: string | null;
   dimensionsVisible: boolean;
   hideOpenings: boolean;
   measurementMode: MeasurementMode | null;
   onDeleteObject: (objectId: string) => void;
   onDeletePartition: (partitionId: string) => void;
+  onDeleteRoomArea: (areaId: string) => void;
   onEditObject: (objectId: string) => void;
   onEditSegment: (target: EditTarget) => void;
   onEditLayoutOffset: (target: EditTarget) => void;
   onMoveObject: (objectId: string, xMm: number, yMm: number) => void;
-  onMovePartition: (partitionId: string, deltaXmm: number, deltaYmm: number) => void;
+  onMovePartition: (partitionId: string, start: PointMm, end: PointMm) => void;
   onMoveWall: (areaId: string, index: number, deltaMm: number) => void;
   onMoveRoomArea: (areaId: string, deltaXmm: number, deltaYmm: number) => void;
   onResetPartition: (partitionId: string) => void;
@@ -2750,16 +2889,18 @@ interface FloorLayerProps {
   selectedSurfaceId: string | null;
   selectedZoneId: string | null;
   selectedWallIndex: number | null;
+  showOpeningNames: boolean;
   view: PlanViewTransform;
 }
 
-function FloorLayer({ dimensionEntryAreaId, dimensionsVisible, hideOpenings, measurementMode, onDeleteObject, onDeletePartition, onEditObject, onEditSegment, onEditLayoutOffset, onMoveObject, onMovePartition, onMoveRoomArea, onMoveWall, onResetPartition, onSelectObject, onSelectOpening, onSelectPartition, onSelectSurface, onSelectZone, onSelectWall, onZonePolygonChange, onZoneShapeChange, project, roomMoveEnabled, selectedObjectId, selectedOpeningId, selectedPartitionId, selectedSurfaceId, selectedZoneId, selectedWallIndex, view }: FloorLayerProps) {
+function FloorLayer({ block, dimensionEntryAreaId, dimensionsVisible, hideOpenings, measurementMode, onDeleteObject, onDeletePartition, onDeleteRoomArea, onEditObject, onEditSegment, onEditLayoutOffset, onMoveObject, onMovePartition, onMoveRoomArea, onMoveWall, onResetPartition, onSelectObject, onSelectOpening, onSelectPartition, onSelectSurface, onSelectZone, onSelectWall, onZonePolygonChange, onZoneShapeChange, project, roomMoveEnabled, selectedObjectId, selectedOpeningId, selectedPartitionId, selectedSurfaceId, selectedZoneId, selectedWallIndex, showOpeningNames, view }: FloorLayerProps) {
+  const [wallDragPreview, setWallDragPreview] = useState<{ areaId: string; deltaMm: number; index: number } | null>(null);
   const areas = project.room.areas ?? [{ id: 'room-1', name: 'Помещение 1', contour: project.room.contour, heightMm: project.room.heightMm }];
   const wallSurfaces = project.surfaces.filter((surface) => surface.type === 'wall');
 
   return (
     <Group>
-      <Text x={54} y={54} text="Пол" fill="#6B6B80" fontSize={18} />
+      <Text x={block.x + 18} y={block.y + 16} text="Пол" fill="#5F5F70" fontSize={18} listening={false} />
       {areas.map((area, areaIndex) => {
         const floorId = areaIndex === 0 ? 'surface-floor' : `surface-floor-${area.id}`;
         const floor = project.surfaces.find((surface) => surface.id === floorId);
@@ -2768,7 +2909,11 @@ function FloorLayer({ dimensionEntryAreaId, dimensionsVisible, hideOpenings, mea
         const surfaceActive = selectedSurfaceId === floorId;
         const shapeLocked = area.shapeLocked ?? (areaIndex === 0 && project.room.templateId === null);
         const layoutOpacity = selectedSurfaceId && !surfaceActive ? 0.32 : selectedZoneId ? 0.34 : 1;
-        const points = area.contour.flatMap((point) => [view.x(point.x), view.y(point.y)]);
+        const renderContour = wallDragPreview?.areaId === area.id
+          ? previewRoomAreaWall(area, wallDragPreview.index, wallDragPreview.deltaMm)
+          : area.contour;
+        const renderBounds = getBoundingBox(renderContour);
+        const points = renderContour.flatMap((point) => [view.x(point.x), view.y(point.y)]);
         const connectedAreaIds = getConnectedAreaIdsForUi(project, area.id);
         if (!floor || !baseZone || !material) return null;
         return (
@@ -2798,9 +2943,9 @@ function FloorLayer({ dimensionEntryAreaId, dimensionsVisible, hideOpenings, mea
             <Line points={points} closed fill={surfaceActive ? '#F2EBF9' : '#FFFFFF'} stroke="#A385C4" strokeWidth={surfaceActive ? 6 : 4} onClick={() => onSelectSurface(floorId)} onTap={() => onSelectSurface(floorId)} />
             <FloorTileLayout
               blockedObjects={project.objects.filter((object) => object.areaId === area.id && object.excludeFloorTile)}
-              contour={area.contour}
+              contour={renderContour}
               layout={baseZone.layout}
-              layoutBounds={getSharedFloorLayoutBox(project, area.id)}
+              layoutBounds={getSharedFloorLayoutBox(project, area.id, renderContour)}
               material={material}
               opacity={layoutOpacity}
               view={view}
@@ -2810,6 +2955,7 @@ function FloorLayer({ dimensionEntryAreaId, dimensionsVisible, hideOpenings, mea
               const zoneActive = selectedZoneId === zone.id;
               return zoneMaterial ? (
                 <FloorZoneLayer
+                  blockedObjects={project.objects.filter((object) => object.areaId === area.id && object.excludeFloorTile)}
                   key={zone.id}
                   material={zoneMaterial}
                   onEditOffset={(edge) => onEditLayoutOffset({ type: 'layout-offset', edge, surfaceId: floorId, zoneId: zone.id })}
@@ -2819,7 +2965,7 @@ function FloorLayer({ dimensionEntryAreaId, dimensionsVisible, hideOpenings, mea
                   selected={zoneActive}
                   showDimensions={measurementMode === 'room'}
                   showEdgeCuts={measurementMode === 'tile'}
-                  surfaceContour={area.contour}
+                  surfaceContour={renderContour}
                   view={view}
                   zone={zone}
                   opacity={surfaceActive && !zoneActive ? 0.48 : 1}
@@ -2827,10 +2973,10 @@ function FloorLayer({ dimensionEntryAreaId, dimensionsVisible, hideOpenings, mea
               ) : null;
             })}
             <Line points={points} closed stroke={surfaceActive ? '#8A6AAE' : '#A385C4'} strokeWidth={surfaceActive ? 6 : 4} onClick={() => onSelectSurface(floorId)} onTap={() => onSelectSurface(floorId)} />
-            {!hideOpenings ? <FloorOpeningMarkers areaId={area.id} contour={area.contour} onSelectOpening={onSelectOpening} project={project} selectedOpeningId={selectedOpeningId} view={view} /> : null}
+            {!hideOpenings ? <FloorOpeningMarkers areaId={area.id} contour={renderContour} onSelectOpening={onSelectOpening} project={project} selectedOpeningId={selectedOpeningId} showNames={showOpeningNames} view={view} /> : null}
             {project.objects.filter((object) => object.areaId === area.id).map((object) => (
               <FloorRoomObject
-                contour={area.contour}
+                contour={renderContour}
                 key={object.id}
                 object={object}
                 objects={project.objects}
@@ -2845,19 +2991,19 @@ function FloorLayer({ dimensionEntryAreaId, dimensionsVisible, hideOpenings, mea
             {measurementMode === 'objects' ? project.objects.filter((object) => object.areaId === area.id && object.id === selectedObjectId).map((object) => (
               <ObjectDistanceLabels
                 key={`distance-${object.id}`}
-                contour={area.contour}
+                contour={renderContour}
                 object={object}
                 objects={project.objects.filter((item) => item.areaId === area.id)}
                 view={view}
               />
             )) : null}
-            {dimensionsVisible && (dimensionEntryAreaId === area.id || selectedSurfaceId === floorId) && !selectedZoneId && !selectedOpeningId && !selectedObjectId && !selectedPartitionId ? area.contour.map((_, index) => (
+            {dimensionsVisible && (dimensionEntryAreaId === area.id || selectedSurfaceId === floorId) && !selectedZoneId && !selectedOpeningId && !selectedObjectId && !selectedPartitionId ? renderContour.map((_, index) => (
               <FloorWallDimensionLabels
                 key={`${floorId}-dimension-${index}`}
                 areaId={area.id}
-                contour={area.contour}
+                contour={renderContour}
                 index={index}
-                laneOffset={areaIndex * 26}
+                laneOffset={0}
                 compact={dimensionEntryAreaId === area.id}
                 onEdit={shapeLocked || (dimensionEntryAreaId && dimensionEntryAreaId !== area.id) ? undefined : () => onEditSegment({ type: 'floor-segment', areaId: area.id, index })}
                 partitions={project.room.partitions ?? []}
@@ -2866,45 +3012,95 @@ function FloorLayer({ dimensionEntryAreaId, dimensionsVisible, hideOpenings, mea
             )) : null}
             {measurementMode === 'tile' && selectedSurfaceId === floorId && !selectedZoneId ? (
               <FloorEdgeCutLabels
-                contour={area.contour}
+                contour={renderContour}
                 layout={baseZone.layout}
                 material={material}
                 onEditOffset={(edge) => onEditLayoutOffset({ type: 'layout-offset', edge, surfaceId: floorId, zoneId: baseZone.id })}
                 view={view}
               />
             ) : null}
-            {area.contour.map((point, index) => {
-              const next = area.contour[(index + 1) % area.contour.length];
+            {renderContour.map((point, index) => {
+              const next = renderContour[(index + 1) % renderContour.length];
               const horizontal = point.y === next.y;
               const wallSurfaceId = areaIndex === 0 ? `surface-wall-${index + 1}` : `surface-wall-${area.id}-${index + 1}`;
               const wallIndex = wallSurfaces.findIndex((wall) => wall.id === wallSurfaceId);
               const selected = selectedSurfaceId === wallSurfaceId;
               return (
-                <Line
-                  key={`${floorId}-wall-${index}`}
-                  points={[view.x(point.x), view.y(point.y), view.x(next.x), view.y(next.y)]}
-                  stroke={selected ? '#8A6AAE' : 'transparent'}
-                  strokeWidth={selected ? 18 : 28}
-                  opacity={selected ? 0.22 : 1}
-                  draggable={roomMoveEnabled && !shapeLocked}
-                  dragBoundFunc={(pos) => (horizontal ? { x: 0, y: pos.y } : { x: pos.x, y: 0 })}
-                  onClick={(event) => { event.cancelBubble = true; if (wallIndex >= 0) onSelectWall(wallIndex); }}
-                  onTap={(event) => { event.cancelBubble = true; if (wallIndex >= 0) onSelectWall(wallIndex); }}
-                  onDragEnd={(event) => { event.cancelBubble = true; if (roomMoveEnabled && !shapeLocked) handleWallDrag(event, area.id, index, horizontal, view.scale, onMoveWall); }}
-                />
+                <Group key={`${floorId}-wall-${index}`}>
+                  {selected ? (
+                    <Group listening={false}>
+                      <Line
+                        points={[view.x(point.x), view.y(point.y), view.x(next.x), view.y(next.y)]}
+                        stroke="#777777"
+                        strokeWidth={15}
+                        opacity={0.3}
+                        shadowColor="#606060"
+                        shadowBlur={18}
+                        shadowOpacity={0.9}
+                      />
+                      <Line
+                        points={[view.x(point.x), view.y(point.y), view.x(next.x), view.y(next.y)]}
+                        stroke="#5E5E5E"
+                        strokeWidth={3}
+                        shadowColor="#4F4F4F"
+                        shadowBlur={28}
+                        shadowOpacity={1}
+                      />
+                    </Group>
+                  ) : null}
+                  <Line
+                    points={[view.x(point.x), view.y(point.y), view.x(next.x), view.y(next.y)]}
+                    stroke="transparent"
+                    strokeWidth={28}
+                    hitStrokeWidth={28}
+                    opacity={1}
+                    draggable={(roomMoveEnabled && !shapeLocked) || dimensionEntryAreaId === area.id}
+                    dragBoundFunc={(pos) => (horizontal ? { x: 0, y: pos.y } : { x: pos.x, y: 0 })}
+                    onDragStart={() => setWallDragPreview({ areaId: area.id, deltaMm: 0, index })}
+                    onDragMove={(event) => {
+                      if (!((roomMoveEnabled && !shapeLocked) || dimensionEntryAreaId === area.id)) return;
+                      const node = event.currentTarget;
+                      const deltaPx = horizontal ? node.y() : node.x();
+                      setWallDragPreview({ areaId: area.id, deltaMm: Math.round(deltaPx / view.scale), index });
+                    }}
+                    onClick={(event) => { event.cancelBubble = true; if (wallIndex >= 0) onSelectWall(wallIndex); }}
+                    onTap={(event) => { event.cancelBubble = true; if (wallIndex >= 0) onSelectWall(wallIndex); }}
+                    onDragEnd={(event) => {
+                      event.cancelBubble = true;
+                      setWallDragPreview(null);
+                      if ((roomMoveEnabled && !shapeLocked) || dimensionEntryAreaId === area.id) handleWallDrag(event, area.id, index, horizontal, view.scale, onMoveWall);
+                    }}
+                  />
+                </Group>
               );
             })}
-            {surfaceActive ? area.contour.map((point, index) => <Circle key={`${floorId}-point-${index}`} x={view.x(point.x)} y={view.y(point.y)} radius={6} fill="#8A6AAE" />) : null}
+            {surfaceActive ? renderContour.map((point, index) => <Circle key={`${floorId}-point-${index}`} x={view.x(point.x)} y={view.y(point.y)} radius={6} fill="#8A6AAE" />) : null}
+            {surfaceActive && !dimensionEntryAreaId ? (
+              <Group
+                x={view.x(renderBounds.maxX) - 38}
+                y={view.y(renderBounds.minY) + 10}
+                onClick={(event) => { event.cancelBubble = true; onDeleteRoomArea(area.id); }}
+                onTap={(event) => { event.cancelBubble = true; onDeleteRoomArea(area.id); }}
+              >
+                <Rect width={28} height={28} fill="#FFFFFF" stroke="#E1B7C0" strokeWidth={1} cornerRadius={6} shadowColor="rgba(38, 24, 50, 0.18)" shadowBlur={6} />
+                <Line points={[8, 8, 20, 8]} stroke="#A83F57" strokeWidth={1.8} lineCap="round" />
+                <Line points={[11, 6, 17, 6]} stroke="#A83F57" strokeWidth={1.8} lineCap="round" />
+                <Rect x={9} y={11} width={10} height={11} stroke="#A83F57" strokeWidth={1.6} cornerRadius={1} />
+              </Group>
+            ) : null}
             {(project.room.partitions ?? []).filter((partition) => (partition.areaId ?? areas[0].id) === area.id).map((partition) => (
               <FloorPartition
                 key={partition.id}
-                contour={area.contour}
+                contour={renderContour}
                 onDelete={() => onDeletePartition(partition.id)}
-                onMove={(deltaXmm, deltaYmm) => onMovePartition(partition.id, deltaXmm, deltaYmm)}
+                onEditLength={() => onEditSegment({ type: 'partition-length', partitionId: partition.id })}
+                onMove={(start, end) => onMovePartition(partition.id, start, end)}
                 onReset={() => onResetPartition(partition.id)}
                 onSelect={() => onSelectPartition(partition.id)}
                 partition={partition}
+                partitions={project.room.partitions ?? []}
                 selected={selectedPartitionId === partition.id}
+                selectedSide={getSelectedPartitionSide(project, selectedSurfaceId, partition.id)}
                 view={view}
               />
             ))}
@@ -3031,12 +3227,12 @@ function FloorDistanceSpan({ start, end, view }: { start: PointMm; end: PointMm;
 }
 
 function DimensionLabel({ compact = false, x, y, text, onClick }: { compact?: boolean; x: number; y: number; text: string; onClick?: () => void }) {
-  const width = compact ? 76 : 96;
-  const height = compact ? 22 : 26;
+  const width = compact ? 64 : 74;
+  const height = compact ? 18 : 20;
   return (
     <Group x={x} y={y} listening={Boolean(onClick)} onClick={onClick} onTap={onClick}>
-      <Rect x={-width / 2} y={-height / 2} width={width} height={height} fill="#FFFFFF" stroke={onClick ? '#A385C4' : '#D9D9E2'} strokeWidth={1} cornerRadius={4} shadowColor="rgba(30, 30, 40, 0.12)" shadowBlur={compact ? 5 : 8} />
-      <Text x={-width / 2 + 2} y={compact ? -5 : -7} width={width - 4} align="center" text={text} fill="#18181E" fontSize={compact ? 11 : 14} />
+      <Rect x={-width / 2} y={-height / 2} width={width} height={height} fill="#FFFFFF" stroke={onClick ? '#A385C4' : '#D9D9E2'} strokeWidth={1} cornerRadius={4} shadowColor="rgba(30, 30, 40, 0.1)" shadowBlur={compact ? 3 : 5} />
+      <Text x={-width / 2 + 2} y={compact ? -4 : -5} width={width - 4} align="center" text={text} fill="#18181E" fontSize={compact ? 10 : 11} />
     </Group>
   );
 }
@@ -3076,16 +3272,7 @@ function FloorWallDimensionLabels({
     .sort((first, second) => segmentLength(start, first) - segmentLength(start, second));
 
   if (!attachedPoints.length) {
-    let label = offsetLabel(getFloorSegmentDimensionPosition(contour, start, end, view), start, end);
-    if (compact && segmentLength(start, end) < 1100) {
-      const box = getBoundingBox(contour);
-      const center = { x: view.x(box.minX + box.width / 2), y: view.y(box.minY + box.height / 2) };
-      const dx = label.x - center.x;
-      const dy = label.y - center.y;
-      const length = Math.max(1, Math.hypot(dx, dy));
-      const extra = 18 + (index % 3) * 16;
-      label = { x: label.x + dx / length * extra, y: label.y + dy / length * extra };
-    }
+    const label = offsetLabel(getFloorDimensionPositions(contour, view, Boolean(compact))[index], start, end);
     return <DimensionLabel compact={compact} x={label.x} y={label.y} text={compact ? `${index + 1} · ${segmentLength(start, end)}` : `${segmentLength(start, end)} мм`} onClick={onEdit} />;
   }
 
@@ -3094,19 +3281,55 @@ function FloorWallDimensionLabels({
     <Group>
       {splitPoints.slice(0, -1).map((point, partIndex) => {
         const next = splitPoints[partIndex + 1];
-        const label = offsetLabel(getFloorSegmentDimensionPosition(contour, point, next, view), point, next);
+        const label = offsetLabel(getFloorSegmentDimensionPosition(contour, point, next, view, compact), point, next);
         return <DimensionLabel key={`wall-part-${index}-${partIndex}`} x={label.x} y={label.y} text={`${segmentLength(point, next)} мм`} />;
       })}
     </Group>
   );
 }
 
-function FloorPartition({ contour, onDelete, onMove, onReset, onSelect, partition, selected, view }: { contour: PointMm[]; onDelete: () => void; onMove: (deltaXmm: number, deltaYmm: number) => void; onReset: () => void; onSelect: () => void; partition: Partition; selected: boolean; view: PlanViewTransform }) {
-  const start = { x: view.x(partition.start.x), y: view.y(partition.start.y) };
-  const end = { x: view.x(partition.end.x), y: view.y(partition.end.y) };
+function FloorPartition({ contour, onDelete, onEditLength, onMove, onReset, onSelect, partition, partitions, selected, selectedSide, view }: {
+  contour: PointMm[];
+  onDelete: () => void;
+  onEditLength: () => void;
+  onMove: (start: PointMm, end: PointMm) => void;
+  onReset: () => void;
+  onSelect: () => void;
+  partition: Partition;
+  partitions: Partition[];
+  selected: boolean;
+  selectedSide: 'a' | 'b' | null;
+  view: PlanViewTransform;
+}) {
+  const [rotationPreview, setRotationPreview] = useState<{ end: PointMm; start: PointMm } | null>(null);
+  const lastValidDragRef = useRef({ x: 0, y: 0 });
+  const renderPartition = rotationPreview ?? partition;
+  const start = { x: view.x(renderPartition.start.x), y: view.y(renderPartition.start.y) };
+  const end = { x: view.x(renderPartition.end.x), y: view.y(renderPartition.end.y) };
   const center = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
   const stripeWidth = Math.max(8, partition.thicknessMm * view.scale);
-  const vertical = partition.start.x === partition.end.x;
+  const lengthCanvas = Math.max(1, Math.hypot(end.x - start.x, end.y - start.y));
+  const sideNormal = { x: -(end.y - start.y) / lengthCanvas, y: (end.x - start.x) / lengthCanvas };
+  let upperNormal = { x: -(end.y - start.y) / lengthCanvas, y: (end.x - start.x) / lengthCanvas };
+  if (upperNormal.y > 0) upperNormal = { x: -upperNormal.x, y: -upperNormal.y };
+  const rotationHandle = { x: center.x + upperNormal.x * 48, y: center.y + upperNormal.y * 48 };
+  const dimensionPosition = { x: center.x - upperNormal.x * 25, y: center.y - upperNormal.y * 25 };
+  const horizontalClearance = Math.abs(upperNormal.x) > 0.01 ? 77 / Math.abs(upperNormal.x) : Number.POSITIVE_INFINITY;
+  const verticalClearance = Math.abs(upperNormal.y) > 0.01 ? 32 / Math.abs(upperNormal.y) : Number.POSITIVE_INFINITY;
+  const actionDistance = 25 + Math.min(horizontalClearance, verticalClearance);
+  const actionPosition = { x: center.x - upperNormal.x * actionDistance, y: center.y - upperNormal.y * actionDistance };
+
+  function getRotatedPartition(pointer: { x: number; y: number }) {
+    const normalAngle = Math.atan2(pointer.y - center.y, pointer.x - center.x);
+    const directionAngle = normalAngle + Math.PI / 2;
+    const lengthMm = segmentLength(partition.start, partition.end);
+    const centerMm = { x: (partition.start.x + partition.end.x) / 2, y: (partition.start.y + partition.end.y) / 2 };
+    return {
+      start: { x: Math.round(centerMm.x - Math.cos(directionAngle) * lengthMm / 2), y: Math.round(centerMm.y - Math.sin(directionAngle) * lengthMm / 2) },
+      end: { x: Math.round(centerMm.x + Math.cos(directionAngle) * lengthMm / 2), y: Math.round(centerMm.y + Math.sin(directionAngle) * lengthMm / 2) },
+    };
+  }
+
   return (
     <Group
       name="floor-partition"
@@ -3115,44 +3338,84 @@ function FloorPartition({ contour, onDelete, onMove, onReset, onSelect, partitio
       onTap={(event) => { event.cancelBubble = true; onSelect(); }}
       onMouseDown={(event) => { event.cancelBubble = true; onSelect(); }}
       onTouchStart={(event) => { event.cancelBubble = true; onSelect(); }}
-      onDragStart={(event) => { event.cancelBubble = true; onSelect(); }}
+      onDragStart={(event) => { event.cancelBubble = true; lastValidDragRef.current = { x: 0, y: 0 }; onSelect(); }}
       onDragMove={(event) => {
+        if (event.target !== event.currentTarget) return;
         event.cancelBubble = true;
-        const wallIndex = partition.wallIndex ?? findBoundarySegmentIndex(contour, partition.start);
-        if (wallIndex < 0) return;
         const node = event.currentTarget;
-        const proposedStart = {
-          x: partition.start.x + node.x() / view.scale,
-          y: partition.start.y + node.y() / view.scale,
-        };
-        const projected = projectPointToSegment(proposedStart, contour[wallIndex], contour[(wallIndex + 1) % contour.length]);
-        node.position({
-          x: (projected.x - partition.start.x) * view.scale,
-          y: (projected.y - partition.start.y) * view.scale,
-        });
+        const delta = { x: Math.round(node.x() / view.scale), y: Math.round(node.y() / view.scale) };
+        const proposedStart = { x: partition.start.x + delta.x, y: partition.start.y + delta.y };
+        const proposedEnd = { x: partition.end.x + delta.x, y: partition.end.y + delta.y };
+        if (isPartitionPlacementValid(contour, proposedStart, proposedEnd, partitions, partition.id)) {
+          lastValidDragRef.current = { x: node.x(), y: node.y() };
+        } else {
+          node.position(lastValidDragRef.current);
+        }
       }}
       onDragEnd={(event) => {
+        if (event.target !== event.currentTarget) return;
         event.cancelBubble = true;
         const node = event.currentTarget;
         const deltaXmm = Math.round(node.x() / view.scale);
         const deltaYmm = Math.round(node.y() / view.scale);
         node.position({ x: 0, y: 0 });
-        onMove(deltaXmm, deltaYmm);
+        if (deltaXmm || deltaYmm) onMove(
+          { x: partition.start.x + deltaXmm, y: partition.start.y + deltaYmm },
+          { x: partition.end.x + deltaXmm, y: partition.end.y + deltaYmm },
+        );
       }}
     >
+      {selectedSide ? (() => {
+        const sideDirection = selectedSide === 'a' ? 1 : -1;
+        const edgeOffset = stripeWidth / 2 + 2;
+        const edgeStart = { x: start.x + sideNormal.x * edgeOffset * sideDirection, y: start.y + sideNormal.y * edgeOffset * sideDirection };
+        const edgeEnd = { x: end.x + sideNormal.x * edgeOffset * sideDirection, y: end.y + sideNormal.y * edgeOffset * sideDirection };
+        return (
+          <Group listening={false}>
+            <Line points={[edgeStart.x, edgeStart.y, edgeEnd.x, edgeEnd.y]} stroke="#777777" strokeWidth={12} opacity={0.3} shadowColor="#606060" shadowBlur={18} shadowOpacity={0.9} lineCap="round" />
+            <Line points={[edgeStart.x, edgeStart.y, edgeEnd.x, edgeEnd.y]} stroke="#5E5E5E" strokeWidth={3} shadowColor="#4F4F4F" shadowBlur={20} shadowOpacity={1} lineCap="round" />
+          </Group>
+        );
+      })() : null}
       <Line points={[start.x, start.y, end.x, end.y]} stroke={selected ? '#563779' : '#6F4F93'} strokeWidth={stripeWidth + (selected ? 4 : 2)} lineCap="butt" />
       <Line points={[start.x, start.y, end.x, end.y]} stroke={selected ? '#B99FD2' : '#CDB9DF'} strokeWidth={Math.max(4, stripeWidth - 2)} lineCap="butt" />
       <Line points={[start.x, start.y, end.x, end.y]} stroke="transparent" strokeWidth={24} />
       <Circle x={center.x} y={center.y} radius={7} fill="#6F4F93" stroke="#FFFFFF" strokeWidth={2} />
-      {selected ? <DraftLengthLabel x={center.x} y={center.y - 22} text={formatDraftLengthMm(partition.start, partition.end)} /> : null}
+      {selected ? <DimensionLabel x={dimensionPosition.x} y={dimensionPosition.y} text={`${segmentLength(renderPartition.start, renderPartition.end)} мм`} onClick={onEditLength} /> : null}
       {selected ? (
         <>
           <Circle x={start.x} y={start.y} radius={5} fill="#6F4F93" />
           <Circle x={end.x} y={end.y} radius={5} fill="#6F4F93" />
+          <Line points={[center.x, center.y, rotationHandle.x, rotationHandle.y]} stroke="#8A6AAE" strokeWidth={1.5} dash={[4, 3]} listening={false} />
+          <Circle
+            x={rotationHandle.x}
+            y={rotationHandle.y}
+            radius={9}
+            fill="#FFFFFF"
+            stroke="#6F4F93"
+            strokeWidth={2}
+            draggable
+            onMouseDown={(event) => { event.cancelBubble = true; }}
+            onTouchStart={(event) => { event.cancelBubble = true; }}
+            onDragMove={(event) => {
+              event.cancelBubble = true;
+              const node = event.currentTarget;
+              const rotated = getRotatedPartition({ x: node.x(), y: node.y() });
+              if (isPartitionPlacementValid(contour, rotated.start, rotated.end, partitions, partition.id)) setRotationPreview(rotated);
+            }}
+            onDragEnd={(event) => {
+              event.cancelBubble = true;
+              const node = event.currentTarget;
+              const rotated = getRotatedPartition({ x: node.x(), y: node.y() });
+              node.position(rotationHandle);
+              setRotationPreview(null);
+              if (isPartitionPlacementValid(contour, rotated.start, rotated.end, partitions, partition.id)) onMove(rotated.start, rotated.end);
+            }}
+          />
         </>
       ) : null}
       {selected ? (
-        <Group x={vertical ? center.x + 62 : center.x - 32} y={vertical ? center.y - 14 : center.y + 30}>
+        <Group x={actionPosition.x - 32} y={actionPosition.y - 14}>
           <Group onClick={(event) => { event.cancelBubble = true; onReset(); }} onTap={(event) => { event.cancelBubble = true; onReset(); }}>
             <Rect width={28} height={28} fill="#FFFFFF" stroke="#CDB9DF" cornerRadius={6} shadowColor="rgba(38, 24, 50, 0.16)" shadowBlur={6} />
             <Text x={2} y={2} width={24} height={24} align="center" verticalAlign="middle" text="↺" fill="#6F4F93" fontSize={20} />
@@ -3175,6 +3438,7 @@ function FloorOpeningMarkers({
   onSelectOpening,
   project,
   selectedOpeningId,
+  showNames,
   view,
 }: {
   areaId: string;
@@ -3182,6 +3446,7 @@ function FloorOpeningMarkers({
   onSelectOpening: (surfaceId: string, openingId: string) => void;
   project: TileProject;
   selectedOpeningId: string | null;
+  showNames: boolean;
   view: PlanViewTransform;
 }) {
   return (
@@ -3212,7 +3477,7 @@ function FloorOpeningMarkers({
                 onClick={(event) => { event.cancelBubble = true; onSelectOpening(surface.id, opening.id); }}
                 onTap={(event) => { event.cancelBubble = true; onSelectOpening(surface.id, opening.id); }}
               />
-              {opening.kind !== 'window' ? <Text x={labelX - 38} y={labelY - 25} width={76} align="center" text={getOpeningDisplayName(opening)} fill="#563779" fontSize={11} listening={false} /> : null}
+              {showNames && opening.kind !== 'window' ? <Text x={labelX - 38} y={labelY - 25} width={76} align="center" text={getOpeningDisplayName(opening)} fill="#563779" fontSize={11} listening={false} /> : null}
             </Group>
           );
         });
@@ -3222,6 +3487,7 @@ function FloorOpeningMarkers({
 }
 
 function WallsLayer({
+  block,
   dimensionsVisible,
   tileOffsetsVisible,
   frames,
@@ -3249,8 +3515,10 @@ function WallsLayer({
   selectedSurfaceId,
   selectedZoneId,
   selectedWallIndex,
+  showOpeningNames,
   onToggleArea,
 }: {
+  block: CanvasSectionBlock;
   dimensionsVisible: boolean;
   tileOffsetsVisible: boolean;
   frames: WallFrame[];
@@ -3278,10 +3546,10 @@ function WallsLayer({
   selectedSurfaceId: string | null;
   selectedZoneId: string | null;
   selectedWallIndex: number | null;
+  showOpeningNames: boolean;
   onToggleArea: (areaId: string) => void;
 }) {
   const firstFramesByArea = frames.filter((frame, index) => frames.findIndex((item) => item.areaId === frame.areaId) === index);
-  const titleY = sections[0] ? sections[0].headerY - 38 : 372;
 
   function resizeWallHeightFromPointer(event: Konva.KonvaEventObject<DragEvent>, areaFrame: WallFrame, heightMarkerX: number) {
     event.cancelBubble = true;
@@ -3297,7 +3565,7 @@ function WallsLayer({
 
   return (
     <Group>
-      <Text x={54} y={titleY} text="Стены" fill="#6B6B80" fontSize={18} />
+      <Text x={block.x + 18} y={block.y + 16} text="Стены" fill="#6B6B80" fontSize={18} listening={false} />
       {sections.map((section) => (
         <Group
           key={`wall-section-${section.areaId}`}
@@ -3308,7 +3576,7 @@ function WallsLayer({
             x={section.x}
             y={section.headerY}
             width={section.width}
-            height={section.expanded ? 42 : 126}
+            height={72}
             fill={section.expanded ? '#F2EBF9' : '#F8F5FB'}
             stroke="#CDB9DF"
             strokeWidth={1}
@@ -3316,10 +3584,10 @@ function WallsLayer({
             shadowColor="rgba(45, 31, 58, 0.08)"
             shadowBlur={5}
           />
-          <Text x={section.x + 16} y={section.headerY + (section.expanded ? 11 : 54)} text={section.name} fill="#4E4458" fontSize={15} />
+          <Text x={section.x + 16} y={section.headerY + 26} text={section.name} fill="#4E4458" fontSize={15} />
           <Text
             x={section.x + section.width - 72}
-            y={section.headerY + (section.expanded ? 10 : 53)}
+            y={section.headerY + 25}
             width={24}
             align="center"
             text="✎"
@@ -3328,7 +3596,7 @@ function WallsLayer({
             onClick={(event) => { event.cancelBubble = true; onRenameArea(section.areaId); }}
             onTap={(event) => { event.cancelBubble = true; onRenameArea(section.areaId); }}
           />
-          <Text x={section.x + section.width - 34} y={section.headerY + (section.expanded ? 12 : 55)} width={20} align="center" text={section.expanded ? '▲' : '▼'} fill="#8A6AAE" fontSize={13} />
+          <Text x={section.x + section.width - 34} y={section.headerY + 27} width={20} align="center" text={section.expanded ? '▲' : '▼'} fill="#8A6AAE" fontSize={13} />
         </Group>
       ))}
       {frames.map((frame) => {
@@ -3336,8 +3604,10 @@ function WallsLayer({
         const relatedToZone = relatedZoneWallIds.includes(frame.id);
         const layoutOpacity = selectedSurfaceId && !active ? 0.38 : 1;
         const surface = project.surfaces.find((item) => item.id === frame.id);
+        const titleWidth = Math.max(frame.width, 150);
         const material = surface?.zones[0]?.materialId ? project.materials.find((item) => item.id === surface.zones[0]?.materialId) : null;
         const layout = surface?.zones[0]?.layout;
+        const frameAreaLocked = project.room.areas?.find((area) => area.id === frame.areaId)?.shapeLocked ?? false;
         return (
           <Group
             key={frame.id}
@@ -3374,17 +3644,23 @@ function WallsLayer({
                 })}
                 opacity={layoutOpacity}
                 selectedOpeningId={selectedOpeningId}
+                showOpeningNames={showOpeningNames}
                 showEdgeCuts={tileOffsetsVisible && active && !selectedZoneId && !selectedOpeningId && !selectedObjectId}
               />
             ) : null}
             {surface?.zones.slice(1).map((zone) => {
               const zoneMaterial = zone.materialId ? project.materials.find((item) => item.id === zone.materialId) : null;
-              if (!zoneMaterial || zone.shape.type !== 'rect') return null;
+              if (!zoneMaterial) return null;
               return (
                 <WallZoneLayer
                   frame={frame}
                   key={zone.id}
                   material={zoneMaterial}
+                  objectBlockers={project.objects.flatMap((object) => {
+                    if (!object.excludeWallTile) return [];
+                    const projection = getRoomObjectWallProjection(project, frame.id, object);
+                    return projection ? [{ type: 'rect' as const, xMm: projection.offsetMm, yMm: Math.max(0, frame.heightMm - object.elevationMm - object.heightMm), widthMm: projection.widthMm, heightMm: object.heightMm }] : [];
+                  })}
                   onEditOffset={(edge) => onEditLayoutOffset({ type: 'layout-offset', edge, surfaceId: frame.id, zoneId: zone.id })}
                   onSelect={() => onSelectZone(frame.id, zone.id)}
                   onShapeChange={(patch) => onZoneShapeChange(frame.id, zone.id, patch)}
@@ -3423,13 +3699,14 @@ function WallsLayer({
               listening={false}
             />
             <Text
-              x={frame.x}
+              x={frame.x - (titleWidth - frame.width) / 2}
               y={tileOffsetsVisible && active ? frame.y - 48 : frame.y - 21}
-              width={frame.width}
+              width={titleWidth}
               align="center"
               text={frame.name}
               fill="#6B6B80"
               fontSize={13}
+              wrap="none"
               listening={false}
             />
             {dimensionsVisible && active && !selectedZoneId && !selectedOpeningId && !selectedObjectId ? (
@@ -3437,7 +3714,7 @@ function WallsLayer({
                 x={frame.x + frame.width / 2}
                 y={frame.y + frame.height + 50}
                 text={`${frame.widthMm} мм`}
-                onClick={() => onEditSegment({ type: 'wall-segment', areaId: frame.areaId, index: frame.segmentIndex, surfaceId: frame.id })}
+                onClick={frameAreaLocked ? undefined : () => onEditSegment({ type: 'wall-segment', areaId: frame.areaId, index: frame.segmentIndex, surfaceId: frame.id })}
               />
             ) : null}
           </Group>
@@ -3467,6 +3744,25 @@ function WallsLayer({
             />
           </Group>
         );
+      }) : null}
+      {selectedOpeningId ? frames.flatMap((frame) => {
+        const surface = project.surfaces.find((item) => item.id === frame.id);
+        const opening = surface?.openings.find((item) => item.id === selectedOpeningId);
+        if (!opening) return [];
+        return [(
+          <WallOpening
+            key={`selected-opening-overlay-${opening.id}`}
+            frame={frame}
+            opening={opening}
+            onDelete={() => onDeleteOpening(opening.id)}
+            onMove={(xMm, yMm) => onMoveOpening(opening.id, xMm, yMm)}
+            onResize={(patch) => onResizeOpening(opening.id, patch)}
+            onReset={() => onResetOpening(opening.id)}
+            onSelect={() => onSelectOpening(frame.id, opening.id)}
+            selected
+            showName={showOpeningNames}
+          />
+        )];
       }) : null}
     </Group>
   );
@@ -3549,6 +3845,7 @@ function WallTileLayout({
   openings,
   opacity,
   selectedOpeningId,
+  showOpeningNames,
   showEdgeCuts,
 }: {
   frame: WallFrame;
@@ -3564,6 +3861,7 @@ function WallTileLayout({
   openings: Opening[];
   opacity: number;
   selectedOpeningId: string | null;
+  showOpeningNames: boolean;
   showEdgeCuts: boolean;
 }) {
   const result = generateRectLayout({
@@ -3589,17 +3887,6 @@ function WallTileLayout({
           strokeWidth={0.7}
         />
       ))}
-      {openings.map((opening) => (
-        <Rect
-          key={`opening-mask-${opening.id}`}
-          x={frame.x + mmToCanvas(opening.xMm)}
-          y={frame.y + mmToCanvas(opening.yMm)}
-          width={mmToCanvas(opening.widthMm)}
-          height={mmToCanvas(opening.heightMm)}
-          fill="#FFFFFF"
-          listening={false}
-        />
-      ))}
       {objectBlockers.map((blocker, index) => (
         <Rect
           key={`object-mask-${index}`}
@@ -3615,6 +3902,7 @@ function WallTileLayout({
       </Group>
       {showEdgeCuts ? <EdgeCutLabels edgeCuts={result.edgeOffsets} height={frame.height} onEditOffset={onEditOffset} width={frame.width} x={frame.x} y={frame.y} /> : null}
       {openings.map((opening) => (
+        opening.id === selectedOpeningId ? null :
         <WallOpening
           key={opening.id}
           frame={frame}
@@ -3625,6 +3913,7 @@ function WallTileLayout({
           onReset={() => onResetOpening(opening.id)}
           onSelect={() => onSelectOpening(opening.id)}
           selected={selectedOpeningId === opening.id}
+          showName={showOpeningNames}
         />
       ))}
     </Group>
@@ -3640,6 +3929,7 @@ function WallOpening({
   onSelect,
   opening,
   selected,
+  showName,
 }: {
   frame: WallFrame;
   onDelete: () => void;
@@ -3649,30 +3939,48 @@ function WallOpening({
   onSelect: () => void;
   opening: Opening;
   selected: boolean;
+  showName: boolean;
 }) {
+  const openingGroupRef = useRef<Konva.Group>(null);
+  const [dragPreview, setDragPreview] = useState<{ xMm: number; yMm: number } | null>(null);
   const openingWidth = mmToCanvas(opening.widthMm);
   const openingHeight = mmToCanvas(opening.heightMm);
   const openingXmm = Math.max(0, Math.min(opening.xMm, Math.max(0, frame.widthMm - opening.widthMm)));
   const openingYmm = Math.max(0, Math.min(opening.yMm, Math.max(0, frame.heightMm - opening.heightMm)));
+  const displayedXmm = dragPreview?.xMm ?? openingXmm;
+  const displayedYmm = dragPreview?.yMm ?? openingYmm;
   const openingY = frame.y + mmToCanvas(openingYmm);
+  const leftDistanceMm = Math.round(displayedXmm);
+  const rightDistanceMm = Math.round(Math.max(0, frame.widthMm - displayedXmm - opening.widthMm));
+  const topDistanceMm = Math.round(displayedYmm);
+  const bottomDistanceMm = Math.round(Math.max(0, frame.heightMm - displayedYmm - opening.heightMm));
+
+  useEffect(() => {
+    if (!selected) return;
+    openingGroupRef.current?.moveToTop();
+    openingGroupRef.current?.getLayer()?.batchDraw();
+  }, [selected]);
 
   return (
     <Group
+      ref={openingGroupRef}
       name="wall-opening"
       x={frame.x + mmToCanvas(openingXmm)}
       y={openingY}
       draggable
       onDragStart={(event) => {
         event.cancelBubble = true;
+        event.currentTarget.moveToTop();
+        setDragPreview({ xMm: openingXmm, yMm: openingYmm });
         onSelect();
       }}
       onDragMove={(event) => {
         event.cancelBubble = true;
         const node = event.currentTarget;
-        node.position({
-          x: Math.max(frame.x, Math.min(node.x(), frame.x + frame.width - openingWidth)),
-          y: opening.kind === 'window' ? Math.max(frame.y, Math.min(node.y(), frame.y + frame.height - openingHeight)) : openingY,
-        });
+        const x = Math.max(frame.x, Math.min(node.x(), frame.x + frame.width - openingWidth));
+        const y = opening.kind === 'window' ? Math.max(frame.y, Math.min(node.y(), frame.y + frame.height - openingHeight)) : openingY;
+        node.position({ x, y });
+        setDragPreview({ xMm: Math.round(canvasToMm(x - frame.x)), yMm: Math.round(canvasToMm(y - frame.y)) });
       }}
       onDragEnd={(event) => {
         event.cancelBubble = true;
@@ -3681,9 +3989,11 @@ function WallOpening({
         const y = opening.kind === 'window' ? Math.max(frame.y, Math.min(node.y(), frame.y + frame.height - openingHeight)) : openingY;
         node.position({ x, y });
         onMove(canvasToMm(x - frame.x), opening.kind === 'window' ? canvasToMm(y - frame.y) : undefined);
+        setDragPreview(null);
       }}
       onMouseDown={(event) => {
         event.cancelBubble = true;
+        event.currentTarget.moveToTop();
         onSelect();
       }}
       onTouchStart={(event) => {
@@ -3715,11 +4025,9 @@ function WallOpening({
         strokeWidth={selected ? 3 : 1.5}
         dash={[8, 6]}
       />
-      <Text y={8} width={openingWidth} align="center" text={getOpeningDisplayName(opening)} fill="#6F4F93" fontSize={12} listening={false} />
+      {showName ? <Text y={8} width={openingWidth} align="center" text={getOpeningDisplayName(opening)} fill="#6F4F93" fontSize={12} listening={false} /> : null}
       {selected ? (
         <>
-          <DimensionLabel x={openingWidth / 2} y={-22} text={`${opening.widthMm} мм`} />
-          <DimensionLabel x={openingWidth + 58} y={openingHeight / 2} text={`${opening.heightMm} мм`} />
         <Group x={-70} y={4}>
           <Group
             onClick={(event) => {
@@ -3751,8 +4059,66 @@ function WallOpening({
             <Rect x={10} y={11} width={8} height={10} stroke="#A83F57" strokeWidth={1.5} cornerRadius={1} />
           </Group>
         </Group>
+          <OpeningDistanceLabels
+            bottomDistanceMm={bottomDistanceMm}
+            frameHeight={frame.height}
+            frameWidth={frame.width}
+            leftDistanceMm={leftDistanceMm}
+            openingHeight={openingHeight}
+            openingWidth={openingWidth}
+            rightDistanceMm={rightDistanceMm}
+            topDistanceMm={topDistanceMm}
+            xInFrame={mmToCanvas(displayedXmm)}
+            yInFrame={mmToCanvas(displayedYmm)}
+          />
         </>
       ) : null}
+    </Group>
+  );
+}
+
+function OpeningDistanceLabels({ bottomDistanceMm, frameHeight, frameWidth, leftDistanceMm, openingHeight, openingWidth, rightDistanceMm, topDistanceMm, xInFrame, yInFrame }: {
+  bottomDistanceMm: number;
+  frameHeight: number;
+  frameWidth: number;
+  leftDistanceMm: number;
+  openingHeight: number;
+  openingWidth: number;
+  rightDistanceMm: number;
+  topDistanceMm: number;
+  xInFrame: number;
+  yInFrame: number;
+}) {
+  const unit = String.fromCharCode(1084, 1084);
+  const horizontalCenter = openingHeight / 2;
+  const verticalCenter = openingWidth / 2;
+  const leftEdge = -xInFrame;
+  const rightEdge = frameWidth - xInFrame;
+  const topEdge = -yInFrame;
+  const bottomEdge = frameHeight - yInFrame;
+  return (
+    <Group listening={false}>
+      <OpeningRadialDistanceGuide start={{ x: leftEdge, y: horizontalCenter }} end={{ x: 0, y: horizontalCenter }} text={`${leftDistanceMm} ${unit}`} />
+      <OpeningRadialDistanceGuide start={{ x: openingWidth, y: horizontalCenter }} end={{ x: rightEdge, y: horizontalCenter }} text={`${rightDistanceMm} ${unit}`} />
+      <OpeningRadialDistanceGuide start={{ x: verticalCenter, y: topEdge }} end={{ x: verticalCenter, y: 0 }} text={`${topDistanceMm} ${unit}`} />
+      <OpeningRadialDistanceGuide start={{ x: verticalCenter, y: openingHeight }} end={{ x: verticalCenter, y: bottomEdge }} text={`${bottomDistanceMm} ${unit}`} />
+    </Group>
+  );
+}
+
+function OpeningRadialDistanceGuide({ end, start, text }: { end: PointMm; start: PointMm; text: string }) {
+  const horizontal = Math.abs(end.x - start.x) >= Math.abs(end.y - start.y);
+  const middleX = (start.x + end.x) / 2;
+  const middleY = (start.y + end.y) / 2;
+  return (
+    <Group>
+      <Line points={[start.x, start.y, end.x, end.y]} stroke="#765594" strokeWidth={1.2} dash={[5, 4]} />
+      <Line points={horizontal ? [start.x, start.y - 4, start.x, start.y + 4] : [start.x - 4, start.y, start.x + 4, start.y]} stroke="#765594" strokeWidth={1.2} />
+      <Line points={horizontal ? [end.x, end.y - 4, end.x, end.y + 4] : [end.x - 4, end.y, end.x + 4, end.y]} stroke="#765594" strokeWidth={1.2} />
+      <Group x={middleX} y={middleY}>
+        <Rect x={-27} y={-8} width={54} height={16} fill="#FFFFFF" stroke="#CDB9DF" strokeWidth={1} cornerRadius={4} />
+        <Text x={-25} y={-5} width={50} align="center" text={text} fill="#4E4458" fontSize={9} />
+      </Group>
     </Group>
   );
 }
@@ -3857,6 +4223,7 @@ function getOpeningResizePatch(opening: Opening, handle: OpeningResizeHandle, de
 function WallZoneLayer({
   frame,
   material,
+  objectBlockers,
   onEditOffset,
   onSelect,
   onShapeChange,
@@ -3868,6 +4235,7 @@ function WallZoneLayer({
 }: {
   frame: WallFrame;
   material: TileMaterial;
+  objectBlockers: Array<{ type: 'rect'; xMm: number; yMm: number; widthMm: number; heightMm: number }>;
   onEditOffset: (edge: keyof LayoutEdgeCuts) => void;
   onSelect: () => void;
   onShapeChange: (patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
@@ -3877,7 +4245,38 @@ function WallZoneLayer({
   showEdgeCuts: boolean;
   zone: FinishZone;
 }) {
-  if (zone.shape.type !== 'rect') return null;
+  if (zone.shape.type === 'polygon') {
+    const result = generatePolygonLayout({
+      layout: zone.layout,
+      points: zone.shape.points,
+      tileHeightMm: material.heightMm,
+      tileWidthMm: material.widthMm,
+    });
+    const points = zone.shape.points.flatMap((point) => [frame.x + mmToCanvas(point.x), frame.y + mmToCanvas(point.y)]);
+    const bounds = getBoundingBox(zone.shape.points);
+    return (
+      <Group
+        opacity={opacity}
+        onClick={(event) => { event.cancelBubble = true; onSelect(); }}
+        onTap={(event) => { event.cancelBubble = true; onSelect(); }}
+      >
+        <Group clipFunc={(context) => {
+          context.beginPath();
+          context.moveTo(frame.x + mmToCanvas(zone.shape.type === 'polygon' ? zone.shape.points[0].x : 0), frame.y + mmToCanvas(zone.shape.type === 'polygon' ? zone.shape.points[0].y : 0));
+          if (zone.shape.type === 'polygon') zone.shape.points.slice(1).forEach((point) => context.lineTo(frame.x + mmToCanvas(point.x), frame.y + mmToCanvas(point.y)));
+          context.closePath();
+        }}>
+          {result.pieces.map((piece) => (
+            <Rect key={piece.id} x={frame.x + mmToCanvas(piece.xMm)} y={frame.y + mmToCanvas(piece.yMm)} width={Math.max(1, mmToCanvas(piece.widthMm))} height={Math.max(1, mmToCanvas(piece.heightMm))} fill={getFloorLayoutPieceFill(piece.kind, material.swatch.value)} stroke={getLayoutPieceStroke(piece.kind)} strokeWidth={0.7} />
+          ))}
+          {objectBlockers.map((blocker, index) => <Rect key={`wall-zone-object-${index}`} x={frame.x + mmToCanvas(blocker.xMm)} y={frame.y + mmToCanvas(blocker.yMm)} width={mmToCanvas(blocker.widthMm)} height={mmToCanvas(blocker.heightMm)} fill="#FFFFFF" listening={false} />)}
+        </Group>
+        <Line points={points} closed fill="rgba(242, 235, 249, 0.12)" stroke={selected ? '#6F4F93' : '#A385C4'} strokeWidth={selected ? 3 : 1.5} dash={selected ? undefined : [8, 6]} />
+        {!selected ? <Text x={frame.x + mmToCanvas(bounds.minX) + 8} y={frame.y + mmToCanvas(bounds.minY) + 8} text={zone.name || 'Зона без названия'} fill="#6F4F93" fontSize={13} /> : null}
+        {selected && showDimensions ? <PolygonSideMeasurements closed points={zone.shape.points} toCanvas={(point) => ({ x: frame.x + mmToCanvas(point.x), y: frame.y + mmToCanvas(point.y) })} /> : null}
+      </Group>
+    );
+  }
   const shape = zone.shape;
   const result = generateRectLayout({
     heightMm: shape.heightMm,
@@ -3930,6 +4329,17 @@ function WallZoneLayer({
             fill={getFloorLayoutPieceFill(piece.kind, material.swatch.value)}
             stroke={getLayoutPieceStroke(piece.kind)}
             strokeWidth={0.7}
+          />
+        ))}
+        {objectBlockers.map((blocker, index) => (
+          <Rect
+            key={`wall-zone-object-mask-${index}`}
+            x={frame.x + mmToCanvas(blocker.xMm)}
+            y={frame.y + mmToCanvas(blocker.yMm)}
+            width={mmToCanvas(blocker.widthMm)}
+            height={mmToCanvas(blocker.heightMm)}
+            fill="#FFFFFF"
+            listening={false}
           />
         ))}
       </Group>
@@ -4008,6 +4418,7 @@ function FloorTileLayout({ blockedObjects, contour, layout, layoutBounds, materi
 }
 
 function FloorZoneLayer({
+  blockedObjects,
   material,
   onEditOffset,
   onPolygonChange,
@@ -4021,6 +4432,7 @@ function FloorZoneLayer({
   view,
   zone,
 }: {
+  blockedObjects: RoomObject[];
   material: TileMaterial;
   onEditOffset: (edge: keyof LayoutEdgeCuts) => void;
   onPolygonChange: (points: PointMm[]) => void;
@@ -4044,12 +4456,12 @@ function FloorZoneLayer({
         onMouseDown={(event) => { event.cancelBubble = true; onSelect(); }}
         onTouchStart={(event) => { event.cancelBubble = true; onSelect(); }}
       >
-        <FloorTileLayout blockedObjects={[]} contour={zone.shape.points} layout={zone.layout} material={material} opacity={opacity} view={view} />
+        <FloorTileLayout blockedObjects={blockedObjects} contour={zone.shape.points} layout={zone.layout} material={material} opacity={opacity} view={view} />
         <Line points={canvasPoints} closed fill="rgba(242, 235, 249, 0.10)" stroke={selected ? '#6F4F93' : '#A385C4'} strokeWidth={selected ? 3 : 1.5} dash={selected ? undefined : [8, 6]} />
         {!selected ? <Text x={view.x(bounds.minX) + 10} y={view.y(bounds.minY) + 10} text={zone.name || 'Зона без названия'} fill="#6F4F93" fontSize={13} /> : null}
         {selected && showEdgeCuts ? <FloorEdgeCutLabels contour={zone.shape.points} layout={zone.layout} material={material} onEditOffset={onEditOffset} view={view} /> : null}
         {selected && showDimensions ? <PolygonSideMeasurements closed points={zone.shape.points} toCanvas={(point) => ({ x: view.x(point.x), y: view.y(point.y) })} /> : null}
-        {selected ? <PolygonZoneHandles points={zone.shape.points} surfaceContour={surfaceContour} view={view} onChange={onPolygonChange} /> : null}
+        {selected && !zone.locked ? <PolygonZoneHandles points={zone.shape.points} surfaceContour={surfaceContour} view={view} onChange={onPolygonChange} /> : null}
       </Group>
     );
   }
@@ -4112,6 +4524,9 @@ function FloorZoneLayer({
             stroke={getLayoutPieceStroke(piece.kind)}
             strokeWidth={0.7}
           />
+        ))}
+        {blockedObjects.map((object) => (
+          <Rect key={`floor-zone-object-mask-${object.id}`} x={view.x(object.xMm)} y={view.y(object.yMm)} width={mmToCanvas(object.lengthMm)} height={mmToCanvas(object.widthMm)} fill="#FFFFFF" listening={false} />
         ))}
       </Group>
       <Rect x={x} y={y} width={width} height={height} fill="rgba(242, 235, 249, 0.16)" stroke={selected ? '#6F4F93' : '#A385C4'} strokeWidth={selected ? 3 : 1.5} dash={selected ? undefined : [8, 6]} />
@@ -4412,7 +4827,7 @@ function TemplateGrid({ onSelect, selectedTemplateId }: { onSelect: (templateId:
 }
 
 function RoomTools({
-  activeSurface,
+  disabled,
   onAddDoor,
   onAddPassage,
   onAddPartition,
@@ -4421,7 +4836,7 @@ function RoomTools({
   partitionDrawingActive,
   project,
 }: {
-  activeSurface: TileProject['surfaces'][number] | null | undefined;
+  disabled: boolean;
   onAddDoor: () => void;
   onAddPassage: () => void;
   onAddPartition: () => void;
@@ -4430,22 +4845,26 @@ function RoomTools({
   partitionDrawingActive: boolean;
   project: TileProject;
 }) {
-  const canAddOpening = activeSurface?.type === 'wall';
   return (
-    <div className="room-tools">
-      <strong>План помещений</strong>
-      <div className="room-tools-stats">
-        <span>Помещений: {project.room.areas?.length ?? 1}</span>
-        <span>Проёмов: {project.room.openings?.length ?? 0}</span>
-        <span>Перегородок: {project.room.partitions?.length ?? 0}</span>
-      </div>
-      <div className="room-tools-actions">
-        {!canAddOpening ? <button type="button" onClick={onAddRoom}>Добавить помещение</button> : null}
-        {canAddOpening ? <button type="button" onClick={onAddDoor}>Дверь</button> : null}
-        {canAddOpening ? <button type="button" onClick={onAddPassage}>Проход</button> : null}
-        {!canAddOpening ? <button type="button" className={partitionDrawingActive ? 'active' : ''} onClick={onAddPartition}>Перегородка</button> : null}
-        {canAddOpening ? <button type="button" onClick={onAddWindow}>Окно</button> : null}
-      </div>
+    <div className="room-panel-stack">
+      <section className="panel-card room-tools">
+        <strong>План помещений</strong>
+        <div className="room-tools-actions">
+          <button type="button" disabled={disabled} onClick={onAddRoom}>Добавить помещение</button>
+          <button type="button" className={partitionDrawingActive ? 'active' : ''} disabled={disabled} onClick={onAddPartition}>Перегородка</button>
+          <button type="button" disabled={disabled} onClick={onAddDoor}>Дверь</button>
+          <button type="button" disabled={disabled} onClick={onAddPassage}>Проход</button>
+          <button type="button" disabled={disabled} onClick={onAddWindow}>Окно</button>
+        </div>
+      </section>
+      <section className="panel-card room-information">
+        <strong>Информация о помещении</strong>
+        <div className="room-tools-stats">
+          <span>Помещений: {project.room.areas?.length ?? 1}</span>
+          <span>Проёмов: {project.room.openings?.length ?? 0}</span>
+          <span>Перегородок: {project.room.partitions?.length ?? 0}</span>
+        </div>
+      </section>
     </div>
   );
 }
@@ -4527,13 +4946,16 @@ function LayoutControl({
   ];
   const offsetX = layout?.originXmm ?? 0;
   const offsetY = layout?.originYmm ?? 0;
-  const patterns: Array<{ label: string; value: LayoutPattern }> = [
+  const popularPatterns: Array<{ label: string; value: LayoutPattern }> = [
+    { label: 'Прямая укладка', value: 'straight' },
+    { label: 'Диагональная', value: 'diagonal' },
+    { label: 'Палубная', value: 'wood-random' },
+  ];
+  const offsetPatterns: Array<{ label: string; value: LayoutPattern }> = [
     { label: 'Без смещения', value: 'straight' },
     { label: '1/2', value: 'half-offset' },
     { label: '1/3', value: 'third-offset' },
     { label: '1/4', value: 'quarter-offset' },
-    { label: 'Под дерево', value: 'wood-random' },
-    { label: 'Диагональ', value: 'diagonal' },
   ];
 
   return (
@@ -4546,13 +4968,13 @@ function LayoutControl({
           onToggle={(event) => handleSectionToggle('laying', event.currentTarget.open)}
         >
           <summary className="layout-options-summary">
-            <strong>Центрирование и схема</strong>
+            <strong>Популярные варианты</strong>
           </summary>
           <div className="layout-page single-page">
             <div className="layout-secondary-grid">
               <button type="button" className={zone?.layout.originMode === 'tile-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('tile-center')}>Плитка в центре</button>
               <button type="button" className={zone?.layout.originMode === 'joint-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('joint-center')}>Шов в центре</button>
-              {patterns.map((pattern) => (
+              {popularPatterns.map((pattern) => (
                 <button key={pattern.value} type="button" className={zone?.layout.pattern === pattern.value ? 'active' : ''} disabled={!zone} onClick={() => onPatternChange(pattern.value)}>{pattern.label}</button>
               ))}
               <button
@@ -4569,6 +4991,23 @@ function LayoutControl({
               </button>
             </div>
             <LayoutMetrics material={material} surface={surface} zone={zone} />
+          </div>
+        </details>
+      </section>
+      <section className="panel-module offset-module">
+        <h1 className="panel-module-title">Смещение</h1>
+        <details
+          className="panel-card panel-section layout-options-select offset-options-select"
+          open={openSection === 'offset'}
+          onToggle={(event) => handleSectionToggle('offset', event.currentTarget.open)}
+        >
+          <summary className="layout-options-summary"><strong>Выберите долю смещения</strong></summary>
+          <div className="layout-page single-page">
+            <div className="layout-secondary-grid offset-pattern-grid">
+              {offsetPatterns.map((pattern) => (
+                <button key={pattern.value} type="button" className={zone?.layout.pattern === pattern.value ? 'active' : ''} disabled={!zone} onClick={() => onPatternChange(pattern.value)}>{pattern.label}</button>
+              ))}
+            </div>
           </div>
         </details>
       </section>
@@ -4619,7 +5058,6 @@ function LayoutControl({
           </div>
         </details>
       </section>
-      <PromoCard />
     </>
   );
 }
@@ -4643,10 +5081,13 @@ function ZonesPanel({
   onSaveZone,
   onSelectZone,
   manualDrawingActive,
+  manualDrawingMode,
   manualPointCount,
   onCancelManualZone,
   onFinishManualZone,
   onStartManualZone,
+  onDrawingModeChange,
+  onUndoManualZonePoint,
   project,
   selectedSurfaceId,
   selectedZoneId,
@@ -4658,10 +5099,13 @@ function ZonesPanel({
   onSaveZone: (surfaceId: string, zoneId: string, name: string, shape: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   onSelectZone: (surfaceId: string, zoneId: string | null) => void;
   manualDrawingActive: boolean;
+  manualDrawingMode: CustomDrawingMode;
   manualPointCount: number;
   onCancelManualZone: () => void;
   onFinishManualZone: () => void;
   onStartManualZone: () => void;
+  onDrawingModeChange: (mode: CustomDrawingMode) => void;
+  onUndoManualZonePoint: () => void;
   project: TileProject;
   selectedSurfaceId: string | null;
   selectedZoneId: string | null;
@@ -4697,8 +5141,11 @@ function ZonesPanel({
       </div>
       {manualDrawingActive ? (
         <div className="manual-zone-controls">
-          <span>Укажите два противоположных угла на выбранной {surface?.type === 'wall' ? 'стене' : 'части пола'} · {manualPointCount} точ.</span>
-          <button type="button" disabled={manualPointCount < 2} onClick={onFinishManualZone}>Сохранить зону</button>
+          <span>Стройте контур отдельными точками на выбранной {surface?.type === 'wall' ? 'стене' : 'части пола'} · {manualPointCount} точ.</span>
+          <button type="button" className={manualDrawingMode === 'orthogonal' ? 'active' : ''} onClick={() => onDrawingModeChange('orthogonal')}>Прямые углы</button>
+          <button type="button" className={manualDrawingMode === 'free' ? 'active' : ''} onClick={() => onDrawingModeChange('free')}>Диагональ</button>
+          <button type="button" className="secondary" disabled={!manualPointCount} onClick={onUndoManualZonePoint}>Отменить точку</button>
+          <button type="button" disabled={manualPointCount < 3} onClick={onFinishManualZone}>Сохранить зону</button>
           <button type="button" className="secondary" onClick={onCancelManualZone}>Отмена</button>
         </div>
       ) : null}
@@ -4711,7 +5158,7 @@ function ZonesPanel({
                 <article key={zone.id} className={selectedZoneId === zone.id ? 'selected' : ''}>
                   <button type="button" className="zone-name-button" onClick={() => onSelectZone(zoneSurface.id, zone.id)}>{zone.name || 'Зона без названия'}</button>
                   <small>{zoneSurface.type === 'floor' ? 'Пол' : zoneSurface.name} · {getZoneShapeLabel(zone)}</small>
-                  <div><button type="button" onClick={() => openZoneDialog(zoneSurface.id, zone.id, 'info')}>Информация</button><button type="button" onClick={() => openZoneDialog(zoneSurface.id, zone.id, 'edit')}>Изменить</button><button type="button" onClick={() => onDeleteZone(zoneSurface.id, zone.id)}>Удалить</button></div>
+                  <div><button type="button" onClick={() => openZoneDialog(zoneSurface.id, zone.id, 'info')}>Информация</button>{zone.locked ? null : <button type="button" onClick={() => openZoneDialog(zoneSurface.id, zone.id, 'edit')}>Изменить</button>}<button type="button" onClick={() => onDeleteZone(zoneSurface.id, zone.id)}>Удалить</button></div>
                 </article>
               )) : <p>Зон пока нет</p>}
             </div>
@@ -4816,6 +5263,9 @@ function getZoneSurfaceLabel(project: TileProject, surface: TileProject['surface
 }
 
 function CalculationDialog({ calculation, onClose }: { calculation: ReturnType<typeof calculateProject>; onClose: () => void }) {
+  const [prices, setPrices] = useState<Record<string, string>>({});
+  const warnings = [...new Set(calculation.warnings)];
+  const totalCost = calculation.materials.reduce((total, item) => total + item.areaM2 * Math.max(0, Number(prices[item.material.id]) || 0), 0);
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="confirm-dialog calculation-dialog" role="dialog" aria-modal="true" aria-labelledby="calculation-title">
@@ -4837,25 +5287,21 @@ function CalculationDialog({ calculation, onClose }: { calculation: ReturnType<t
         <div className="calculation-list">
           {calculation.materials.map((item) => (
             <article key={item.material.id}>
-              <strong>{item.material.label ?? item.material.name}</strong>
-              <span>{item.totalPieces} шт. + запас {item.reservePieces} шт. = {item.purchasePieces} шт.</span>
-              <small>{item.areaM2.toFixed(2)} м², зон: {item.zones.length}, коробок: {item.boxes ?? 'не задано'}</small>
-              <div className="calculation-zone-list">
-                {item.zones.map((zone) => (
-                  <span key={zone.zoneId}>
-                    {zone.surfaceName} · {zone.zoneName}: {zone.areaM2.toFixed(2)} м², {zone.purchasePieces} шт.{zone.criticalPieces ? ', критичных ' + zone.criticalPieces : ''}
-                  </span>
-                ))}
-              </div>
+              <div className="calculation-material-title"><span className="calculation-color-chip" style={{ background: item.material.swatch.value }} /><strong>{item.material.name}</strong></div>
+              <span>{item.material.label ?? `${item.material.widthMm} × ${item.material.heightMm} мм`} · {item.areaM2.toFixed(2)} м²</span>
+              <small>К покупке: {item.purchasePieces} шт.{item.boxes ? ` · ${item.boxes} кор.` : ''}</small>
+              <label className="calculation-price">Цена за м², ₽<input type="number" min={0} step={1} value={prices[item.material.id] ?? ''} placeholder="0" onChange={(event) => setPrices((current) => ({ ...current, [item.material.id]: event.currentTarget.value }))} /></label>
+              <b>{(item.areaM2 * Math.max(0, Number(prices[item.material.id]) || 0)).toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽</b>
             </article>
           ))}
         </div>
-        {calculation.warnings.length ? (
+        {warnings.length ? (
           <div className="calculation-warnings">
-            {calculation.warnings.slice(0, 4).map((warning) => <span key={warning}>{warning}</span>)}
+            {warnings.slice(0, 4).map((warning) => <span key={warning}>{warning}</span>)}
           </div>
         ) : null}
-        <p>Расчёт консервативный: зоны считаются отдельными областями, без вычитания окон, мебели и сантехники.</p>
+        <div className="calculation-total"><span>Итоговая стоимость</span><strong>{totalCost.toLocaleString('ru-RU', { maximumFractionDigits: 2 })} ₽</strong></div>
+        <p>Общая сводка учитывает проёмы и выбранные исключения плитки под объектами и за ними.</p>
         <div className="confirm-actions">
           <button type="button" className="confirm-submit" onClick={onClose}>Закрыть</button>
         </div>
@@ -4912,26 +5358,92 @@ interface WallLayout {
   sections: WallAreaSection[];
 }
 
+interface CanvasSectionBlock {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface CanvasSectionBlocks {
+  floor: CanvasSectionBlock;
+  walls: CanvasSectionBlock;
+}
+
 function getFloorDimensionPosition(contour: PointMm[], index: number, view: PlanViewTransform) {
   const point = contour[index];
   const next = contour[(index + 1) % contour.length];
   return getFloorSegmentDimensionPosition(contour, point, next, view);
 }
 
-function getFloorSegmentDimensionPosition(contour: PointMm[], point: PointMm, next: PointMm, view: PlanViewTransform) {
+function getFloorSegmentDimensionPosition(contour: PointMm[], point: PointMm, next: PointMm, view: PlanViewTransform, compact = false) {
   const box = getBoundingBox(contour);
   const center = { x: view.x(box.minX + box.width / 2), y: view.y(box.minY + box.height / 2) };
   const mid = { x: (view.x(point.x) + view.x(next.x)) / 2, y: (view.y(point.y) + view.y(next.y)) / 2 };
   const horizontal = point.y === next.y;
 
   if (horizontal) {
-    return { x: mid.x, y: mid.y < center.y ? mid.y - 24 : mid.y + 24 };
+    const offset = compact ? 15 : 17;
+    return { x: mid.x, y: mid.y < center.y ? mid.y - offset : mid.y + offset };
   }
 
-  return { x: mid.x < center.x ? mid.x - 58 : mid.x + 58, y: mid.y };
+  const offset = compact ? 37 : 42;
+  return { x: mid.x < center.x ? mid.x - offset : mid.x + offset, y: mid.y };
 }
 
-function getSharedFloorLayoutBox(project: TileProject, areaId: string): ReturnType<typeof getBoundingBox> {
+function getFloorDimensionPositions(contour: PointMm[], view: PlanViewTransform, compact: boolean): Array<{ x: number; y: number }> {
+  const width = compact ? 64 : 74;
+  const height = compact ? 18 : 20;
+  const gap = 4;
+  const positions = contour.map((point, index) => getFloorSegmentDimensionPosition(contour, point, contour[(index + 1) % contour.length], view, compact));
+  const initial = positions.map((position) => ({ ...position }));
+  const segments = contour.map((point, index) => {
+    const next = contour[(index + 1) % contour.length];
+    const dx = view.x(next.x) - view.x(point.x);
+    const dy = view.y(next.y) - view.y(point.y);
+    const length = Math.max(1, Math.hypot(dx, dy));
+    return { horizontal: Math.abs(dx) >= Math.abs(dy), length, tangent: { x: dx / length, y: dy / length } };
+  });
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false;
+    for (let firstIndex = 0; firstIndex < positions.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < positions.length; secondIndex += 1) {
+        const first = positions[firstIndex];
+        const second = positions[secondIndex];
+        if (Math.abs(first.x - second.x) >= width + gap || Math.abs(first.y - second.y) >= height + gap) continue;
+
+        const firstSegment = segments[firstIndex];
+        const secondSegment = segments[secondIndex];
+        const moveIndex = firstSegment.horizontal !== secondSegment.horizontal
+          ? firstSegment.horizontal ? secondIndex : firstIndex
+          : secondIndex;
+        const fixedIndex = moveIndex === firstIndex ? secondIndex : firstIndex;
+        const moving = positions[moveIndex];
+        const fixed = positions[fixedIndex];
+        const segment = segments[moveIndex];
+        const alongSize = segment.horizontal ? width : height;
+        const alongDistance = segment.horizontal ? Math.abs(moving.x - fixed.x) : Math.abs(moving.y - fixed.y);
+        const requiredShift = Math.max(2, alongSize + gap - alongDistance);
+        const relative = (moving.x - fixed.x) * segment.tangent.x + (moving.y - fixed.y) * segment.tangent.y;
+        const direction = relative === 0 ? (moveIndex > fixedIndex ? 1 : -1) : Math.sign(relative);
+        const maxShift = Math.max(10, (segment.length - alongSize) / 2 + 4);
+        const nextShift = Math.max(-maxShift, Math.min(maxShift,
+          (moving.x - initial[moveIndex].x) * segment.tangent.x
+          + (moving.y - initial[moveIndex].y) * segment.tangent.y
+          + requiredShift * direction));
+        moving.x = initial[moveIndex].x + segment.tangent.x * nextShift;
+        moving.y = initial[moveIndex].y + segment.tangent.y * nextShift;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  return positions;
+}
+
+function getSharedFloorLayoutBox(project: TileProject, areaId: string, previewContour?: PointMm[]): ReturnType<typeof getBoundingBox> {
   const areas = project.room.areas ?? [{ id: 'room-1', name: 'Помещение 1', contour: project.room.contour }];
   const areaIndex = areas.findIndex((area) => area.id === areaId);
   const floorId = areaIndex <= 0 ? 'surface-floor' : `surface-floor-${areaId}`;
@@ -4945,7 +5457,7 @@ function getSharedFloorLayoutBox(project: TileProject, areaId: string): ReturnTy
     const candidateZone = project.surfaces.find((surface) => surface.id === candidateFloorId)?.zones[0];
     return Boolean(candidateZone) && `${candidateZone?.materialId ?? ''}|${JSON.stringify(candidateZone?.layout)}` === sourceKey;
   });
-  return getBoundingBox((sharedAreas.length ? sharedAreas : areas.filter((area) => area.id === areaId)).flatMap((area) => area.contour));
+  return getBoundingBox((sharedAreas.length ? sharedAreas : areas.filter((area) => area.id === areaId)).flatMap((area) => area.id === areaId && previewContour ? previewContour : area.contour));
 }
 
 function getConnectedAreaIdsForUi(project: TileProject, areaId: string): Set<string> {
@@ -4989,6 +5501,21 @@ function pointerToDraftPoint(pointer: { x: number; y: number }, viewport: Canvas
   };
 }
 
+function constrainCanvasViewport(viewport: CanvasViewport): CanvasViewport {
+  return { ...viewport, x: Math.min(0, viewport.x), y: Math.min(getZoomTopInset(viewport.zoom), viewport.y) };
+}
+
+function getZoomTopInset(zoom: number): number {
+  return Math.max(0, Math.round(80 - 80 * clampZoom(zoom)));
+}
+
+function changeCanvasZoom(viewport: CanvasViewport, nextZoomValue: number): CanvasViewport {
+  const nextZoom = clampZoom(nextZoomValue);
+  const currentInset = getZoomTopInset(viewport.zoom);
+  const nextInset = getZoomTopInset(nextZoom);
+  return constrainCanvasViewport({ ...viewport, zoom: nextZoom, y: viewport.y - currentInset + nextInset });
+}
+
 function pointerToPlanPoint(pointer: { x: number; y: number }, viewport: CanvasViewport, view: PlanViewTransform): PointMm {
   const canvasX = (pointer.x - viewport.x) / viewport.zoom;
   const canvasY = (pointer.y - viewport.y) / viewport.zoom;
@@ -5029,12 +5556,13 @@ function getWallLayout(project: TileProject, view: PlanViewTransform, collapsedA
   const frames: WallFrame[] = [];
   const sections: WallAreaSection[] = [];
   const horizontalInset = 16;
+  const headerWidthReduction = gridPxForMm(MINOR_GRID_MM);
   const sectionWidth = Math.max(
-    320,
+    300,
     ...areas.map((area) => (wallsByArea.get(area.id) ?? []).slice(0, 4).reduce(
       (width, { wall }, index) => width + mmToCanvas(wall.widthMm) + (index ? gap : 0),
       horizontalInset * 2,
-    )),
+    ) - headerWidthReduction),
   );
   for (const area of areas) {
     const areaWalls = wallsByArea.get(area.id) ?? [];
@@ -5043,11 +5571,11 @@ function getWallLayout(project: TileProject, view: PlanViewTransform, collapsedA
     sections.push({ areaId: area.id, expanded, headerY, name: area.name, width: sectionWidth, x: startX - horizontalInset });
 
     if (!expanded) {
-      sectionY += 140;
+      sectionY += 112;
       continue;
     }
 
-    const frameY = headerY + 74;
+    const frameY = headerY + 104;
     let frameX = startX;
     let maxHeight = mmToCanvas(area.heightMm ?? project.room.heightMm);
     for (const { index, wall } of areaWalls) {
@@ -5073,6 +5601,42 @@ function getWallLayout(project: TileProject, view: PlanViewTransform, collapsedA
   }
 
   return { frames, sections };
+}
+
+function getCanvasSectionBlocks(project: TileProject, view: PlanViewTransform, wallLayout: WallLayout): CanvasSectionBlocks {
+  const areas = project.room.areas ?? [{ contour: project.room.contour }];
+  const floorBox = getBoundingBox(areas.flatMap((area) => area.contour));
+  const floorTop = 80;
+  const wallsTitleY = wallLayout.sections[0] ? wallLayout.sections[0].headerY - 38 : 414;
+  const wallsTop = wallsTitleY - 16;
+  const sharedRight = Math.max(
+    420,
+    view.x(floorBox.maxX) + 76,
+    ...wallLayout.sections.map((section) => section.x + section.width + 20),
+    ...wallLayout.frames.map((frame) => frame.x + frame.width + 30),
+  );
+  const wallsBottom = Math.max(
+    wallsTitleY + 150,
+    ...wallLayout.frames.map((frame) => frame.y + frame.height + 115),
+    ...wallLayout.sections.map((section) => section.headerY + 96),
+  ) + 12;
+  const naturalFloorBottom = Math.max(floorTop + 180, view.y(floorBox.maxY) + 52);
+  const floorBottom = Math.min(naturalFloorBottom, wallsTop - 16);
+
+  return {
+    floor: {
+      x: 30,
+      y: floorTop,
+      width: sharedRight - 30,
+      height: floorBottom - floorTop,
+    },
+    walls: {
+      x: 30,
+      y: wallsTop,
+      width: sharedRight - 30,
+      height: wallsBottom - wallsTop,
+    },
+  };
 }
 
 function getInlineEdit(
@@ -5106,6 +5670,21 @@ function getInlineEdit(
       target,
       top: Math.round(viewport.y + metric.y * viewport.zoom),
       value: metric.value,
+    };
+  }
+
+  if (target.type === 'partition-length') {
+    const partition = project.room.partitions?.find((item) => item.id === target.partitionId);
+    const center = partition
+      ? { x: (view.x(partition.start.x) + view.x(partition.end.x)) / 2, y: (view.y(partition.start.y) + view.y(partition.end.y)) / 2 }
+      : { x: 200, y: 200 };
+    return {
+      left: Math.round(viewport.x + center.x * viewport.zoom),
+      max: 15000,
+      min: 250,
+      target,
+      top: Math.round(viewport.y + (center.y - 28) * viewport.zoom),
+      value: partition ? segmentLength(partition.start, partition.end) : 250,
     };
   }
 
@@ -5159,7 +5738,7 @@ function getLayoutOffsetMetric(
 }
 
 function getZoneLayoutResult(surface: TileProject['surfaces'][number], zone: FinishZone, material: TileMaterial) {
-  if (surface.type === 'floor' && zone.shape.type === 'polygon') {
+  if (zone.shape.type === 'polygon') {
     return generatePolygonLayout({ layout: zone.layout, points: zone.shape.points, tileHeightMm: material.heightMm, tileWidthMm: material.widthMm });
   }
   const rectShape = zone.shape.type === 'rect' ? zone.shape : null;
@@ -5215,7 +5794,7 @@ function handleWallDrag(event: Konva.KonvaEventObject<DragEvent>, areaId: string
   const deltaPx = horizontal ? node.y() : node.x();
   node.position({ x: 0, y: 0 });
   const deltaMm = Math.round(deltaPx / scale);
-  if (Math.abs(deltaMm) >= 10) onMoveWall(areaId, index, deltaMm);
+  if (Math.abs(deltaMm) >= 1) onMoveWall(areaId, index, deltaMm);
 }
 
 function constrainPartitionEnd(start: PointMm, pointer: PointMm): PointMm {
@@ -5272,6 +5851,11 @@ function isPartitionInsideContour(contour: PointMm[], start: PointMm, end: Point
     if (!pointInPolygonOrBoundary(point, contour)) return false;
   }
   return true;
+}
+
+function isPartitionPlacementValid(contour: PointMm[], start: PointMm, end: PointMm, partitions: Partition[], partitionId?: string): boolean {
+  if (segmentLength(start, end) < 250 || !isSegmentInsidePolygon(contour, start, end)) return false;
+  return !partitions.some((partition) => partition.id !== partitionId && segmentsCross(start, end, partition.start, partition.end));
 }
 
 function isSegmentInsidePolygon(contour: PointMm[], start: PointMm, end: PointMm): boolean {

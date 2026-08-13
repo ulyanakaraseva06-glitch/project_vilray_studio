@@ -1,6 +1,6 @@
 import { serviceConfig, templates, tileSizePresets } from '../config/appConfig';
 import type { FinishZone, Opening, Partition, PointMm, ProjectSettings, RectZone, Room, RoomArea, RoomObject, RoomTemplate, Surface, TileMaterial, TileProject, TileSizePreset } from '../types/project';
-import { createContourFromTemplate, createSurfacesFromRoom, getBoundingBox, moveWall, normalizeRoomModel, segmentLength, updateSegmentLength, validateContour, validateRoomHeight } from './geometry';
+import { createContourFromTemplate, createSurfacesFromRoom, getBoundingBox, moveSquareWall, moveWall, normalizeRoomModel, resizeSquareContour, segmentLength, updateSegmentLength, validateContour, validateRoomHeight } from './geometry';
 
 const PRIMARY_MATERIAL_ID = 'material-primary';
 const DEFAULT_TILE_PRESET_ID = '600x1200';
@@ -101,8 +101,15 @@ export function updateRoomAreaSegmentLength(project: TileProject, areaId: string
   const room = normalizeRoomModel(normalized.room);
   const areas = room.areas ?? [];
   const areaIndex = areas.findIndex((area) => area.id === areaId);
-  if (areaIndex < 0) return normalized;
-  return updateRoomAreaContour(normalized, areaIndex, updateSegmentLength(areas[areaIndex].contour, segmentIndex, lengthMm));
+  if (areaIndex < 0 || areas[areaIndex].shapeLocked) return normalized;
+  const originalBox = getBoundingBox(areas[areaIndex].contour);
+  const resized = areas[areaIndex].templateId === 'square'
+    ? resizeSquareContour(areas[areaIndex].contour, lengthMm)
+    : updateSegmentLength(areas[areaIndex].contour, segmentIndex, lengthMm);
+  const resizedBox = getBoundingBox(resized);
+  const contour = resized.map((point) => ({ x: point.x + originalBox.minX - resizedBox.minX, y: point.y + originalBox.minY - resizedBox.minY }));
+  if (areas.some((area, index) => index !== areaIndex && polygonsOverlapInterior(contour, area.contour))) return normalized;
+  return updateRoomAreaContour(normalized, areaIndex, contour);
 }
 
 export function confirmRoomAreaDimensions(project: TileProject, areaId: string, lengthsMm: number[]): { error?: string; project: TileProject } {
@@ -135,8 +142,22 @@ export function moveRoomAreaWall(project: TileProject, areaId: string, segmentIn
   const room = normalizeRoomModel(normalized.room);
   const areas = room.areas ?? [];
   const areaIndex = areas.findIndex((area) => area.id === areaId);
-  if (areaIndex < 0) return normalized;
-  return updateRoomAreaContour(normalized, areaIndex, moveWall(areas[areaIndex].contour, segmentIndex, deltaMm));
+  if (areaIndex < 0 || areas[areaIndex].shapeLocked) return normalized;
+  const contour = previewRoomAreaWall(areas[areaIndex], segmentIndex, deltaMm);
+  if (areas.some((area, index) => index !== areaIndex && polygonsOverlapInterior(contour, area.contour))) return normalized;
+  return updateRoomAreaContour(normalized, areaIndex, contour);
+}
+
+export function previewRoomAreaWall(area: RoomArea, segmentIndex: number, deltaMm: number): PointMm[] {
+  const originalBox = getBoundingBox(area.contour);
+  const movedContour = area.templateId === 'square'
+    ? moveSquareWall(area.contour, segmentIndex, deltaMm)
+    : moveWall(area.contour, segmentIndex, deltaMm);
+  const movedBox = getBoundingBox(movedContour);
+  return movedContour.map((point) => ({
+    x: point.x + originalBox.minX - movedBox.minX,
+    y: point.y + originalBox.minY - movedBox.minY,
+  }));
 }
 
 function updateRoomAreaContour(project: TileProject, areaIndex: number, contour: TileProject['room']['contour']): TileProject {
@@ -200,14 +221,23 @@ export function updateZoneTileMaterial(project: TileProject, surfaceId: string, 
   return assignMaterialToZone(normalized, surfaceId, zoneId, material);
 }
 
-export function updateZoneTileColor(project: TileProject, surfaceId: string, zoneId: string, color: string): TileProject {
+export function updateZoneTileColor(project: TileProject, surfaceId: string, zoneId: string, color: string, customName?: string): TileProject {
   const normalized = ensureProjectDefaults(project);
   const surface = normalized.surfaces.find((item) => item.id === surfaceId);
   const zone = surface?.zones.find((item) => item.id === zoneId);
   const source = zone?.materialId ? normalized.materials.find((item) => item.id === zone.materialId) : getPrimaryMaterial(normalized);
   if (!surface || !zone || !source || !/^#[0-9a-f]{6}$/i.test(color)) return normalized;
-  const materialId = `material-color-${surfaceId}-${zoneId}`.replace(/[^a-z0-9-]/gi, '-');
-  const material: TileMaterial = { ...source, id: materialId, name: `${source.name} — ${color.toUpperCase()}`, swatch: { type: 'color', value: color.toUpperCase() } };
+  const normalizedColor = color.toUpperCase();
+  const normalizedName = customName?.trim().slice(0, 60) || `Цвет ${normalizedColor}`;
+  const reusable = normalized.materials.find((item) =>
+    item.widthMm === source.widthMm
+    && item.heightMm === source.heightMm
+    && item.swatch.type === 'color'
+    && item.swatch.value.toUpperCase() === normalizedColor
+    && item.name === normalizedName,
+  );
+  const materialId = reusable?.id ?? `material-color-${Date.now()}-${normalized.materials.length + 1}`;
+  const material: TileMaterial = reusable ?? { ...source, id: materialId, name: normalizedName, swatch: { type: 'color', value: normalizedColor } };
   return {
     ...normalized,
     updatedAt: new Date().toISOString(),
@@ -329,21 +359,14 @@ export function addWallZone(project: TileProject, surfaceId: string, kind: ZoneP
 export function addManualZone(project: TileProject, surfaceId: string, points: PointMm[]): { project: TileProject; zone: FinishZone | null } {
   const normalized = ensureProjectDefaults(project);
   const surface = normalized.surfaces.find((item) => item.id === surfaceId);
-  if (!surface || points.length < 2) return { project: normalized, zone: null };
+  if (!surface || points.length < 3) return { project: normalized, zone: null };
   const baseZone = surface.zones[0];
   const seed = createFloorZone(surface, baseZone?.materialId ?? getPrimaryMaterial(normalized)?.id ?? null, normalized.settings, 'rect');
-  const box = getBoundingBox(points);
-  const surfaceBox = surface.type === 'floor' && baseZone?.shape.type === 'polygon' ? getBoundingBox(baseZone.shape.points) : { minX: 0, minY: 0 };
-  const shape = clampRectZone({
-    type: 'rect',
-    xMm: Math.round(box.minX - surfaceBox.minX),
-    yMm: Math.round(box.minY - surfaceBox.minY),
-    widthMm: Math.round(box.width),
-    heightMm: Math.round(box.height),
-  }, surface);
+  const shape = { type: 'polygon' as const, points: points.map((point) => ({ x: Math.round(point.x), y: Math.round(point.y) })) };
   const zone: FinishZone = {
     ...seed,
     id: `${surface.id}-manual-zone-${Date.now()}`,
+    locked: true,
     name: `Ручная зона ${surface.zones.length}`,
     relatedSurfaceIds: surface.type === 'floor'
       ? normalized.surfaces.filter((item) => item.type === 'wall' && item.sourceRef?.startsWith(`wall:${surface.sourceRef?.split(':')[1]}:`)).map((item) => item.id)
@@ -383,7 +406,7 @@ export function updateZonePolygonPoints(project: TileProject, surfaceId: string,
   const zoneIndex = surface?.zones.findIndex((zone) => zone.id === zoneId) ?? -1;
   if (!surface || zoneIndex <= 0 || points.length < 3) return normalized;
   const zone = surface.zones[zoneIndex];
-  if (zone.shape.type !== 'polygon') return normalized;
+  if (zone.locked || zone.shape.type !== 'polygon') return normalized;
   const nextPoints = points.map((point) => ({ x: Math.round(point.x), y: Math.round(point.y) }));
 
   return {
@@ -480,10 +503,10 @@ export function addAdjacentRoom(project: TileProject): TileProject {
 }
 
 export function addRoomFromTemplate(project: TileProject, template: RoomTemplate, size?: [number, number]): TileProject {
-  return addRoomFromContour(project, createContourFromTemplate(template, size), false);
+  return addRoomFromContour(project, createContourFromTemplate(template, size), false, template.id);
 }
 
-export function addRoomFromContour(project: TileProject, contour: TileProject['room']['contour'], shapeLocked = true): TileProject {
+export function addRoomFromContour(project: TileProject, contour: TileProject['room']['contour'], shapeLocked = true, templateId: string | null = null): TileProject {
   const normalized = ensureProjectDefaults(project);
   const room = normalizeRoomModel(normalized.room);
   const materialId = getPrimaryMaterial(normalized)?.id ?? null;
@@ -500,6 +523,7 @@ export function addRoomFromContour(project: TileProject, contour: TileProject['r
     name: `Помещение ${areaIndex}`,
     heightMm: room.heightMm,
     shapeLocked,
+    templateId,
     contour: contour.map((point) => ({ x: Math.round(point.x + offsetX), y: Math.round(point.y + offsetY) })),
   };
   const nextRoom = normalizeRoomModel({ ...room, areas: [...areas, area] });
@@ -508,6 +532,56 @@ export function addRoomFromContour(project: TileProject, contour: TileProject['r
     updatedAt: new Date().toISOString(),
     room: nextRoom,
     surfaces: createSurfacesWithAssignments(nextRoom, normalized, materialId),
+  };
+}
+
+export function deleteRoomArea(project: TileProject, areaId: string): RoomActionResult {
+  const normalized = ensureProjectDefaults(project);
+  const areas = normalized.room.areas ?? [];
+  if (!areas.some((area) => area.id === areaId)) return { project: normalized };
+  if (areas.length <= 1) {
+    return { error: 'Нельзя удалить единственное помещение. Сначала добавьте другое помещение или сбросьте проект.', project: normalized };
+  }
+
+  const deletedOpeningIds = new Set(
+    (normalized.room.openings ?? [])
+      .filter((opening) => getOpeningAreaId(normalized, opening) === areaId)
+      .map((opening) => opening.id),
+  );
+  const remainingAreas = areas.filter((area) => area.id !== areaId);
+  const nextPrimaryArea = remainingAreas[0];
+  const openings = (normalized.room.openings ?? [])
+    .filter((opening) => !deletedOpeningIds.has(opening.id))
+    .map((opening) => {
+      const openingAreaId = getOpeningAreaId(normalized, opening);
+      const sourceParts = normalized.surfaces.find((surface) => surface.id === opening.surfaceId)?.sourceRef?.split(':') ?? [];
+      const nextSurfaceId = openingAreaId === nextPrimaryArea.id && sourceParts[0] === 'wall'
+        ? `surface-wall-${sourceParts[2]}`
+        : opening.surfaceId;
+      return {
+        ...opening,
+        connectedOpeningId: opening.connectedOpeningId && deletedOpeningIds.has(opening.connectedOpeningId) ? undefined : opening.connectedOpeningId,
+        surfaceId: nextSurfaceId,
+      };
+    });
+  const room = normalizeRoomModel({
+    ...normalized.room,
+    templateId: nextPrimaryArea.templateId ?? null,
+    contour: nextPrimaryArea.contour,
+    heightMm: nextPrimaryArea.heightMm ?? normalized.room.heightMm,
+    areas: remainingAreas,
+    openings,
+    partitions: normalized.room.partitions?.filter((partition) => (partition.areaId ?? areas[0].id) !== areaId),
+  });
+  const materialId = getPrimaryMaterial(normalized)?.id ?? null;
+  return {
+    project: {
+      ...normalized,
+      updatedAt: new Date().toISOString(),
+      room,
+      objects: normalized.objects.filter((object) => object.areaId !== areaId),
+      surfaces: createSurfacesWithAssignments(room, normalized, materialId),
+    },
   };
 }
 
@@ -679,13 +753,14 @@ export function connectRoomOpenings(project: TileProject, sourceOpeningId: strin
     partitions: normalized.room.partitions?.map((partition) => sourceComponent.has(partition.areaId ?? areas[0]?.id ?? 'room-1') ? { ...partition, start: transform(partition.start), end: transform(partition.end) } : partition),
   });
   const materialId = getPrimaryMaterial(normalized)?.id ?? null;
+  const connectedProject = {
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+    room: nextRoom,
+    surfaces: createSurfacesWithAssignments(nextRoom, normalized, materialId),
+  };
   return {
-    project: {
-      ...normalized,
-      updatedAt: new Date().toISOString(),
-      room: nextRoom,
-      surfaces: createSurfacesWithAssignments(nextRoom, normalized, materialId),
-    },
+    project: keepProjectInsidePlanCanvas(connectedProject),
   };
 }
 
@@ -763,7 +838,7 @@ export function moveOpening(project: TileProject, openingId: string, xMm: number
       : partition),
   });
   const materialId = getPrimaryMaterial(normalized)?.id ?? null;
-  return {
+  return keepProjectInsidePlanCanvas({
     ...normalized,
     updatedAt: new Date().toISOString(),
     room: nextRoom,
@@ -775,7 +850,7 @@ export function moveOpening(project: TileProject, openingId: string, xMm: number
       yMm: object.yMm + deltaYmm,
     } : object),
     surfaces: createSurfacesWithAssignments(nextRoom, normalized, materialId),
-  };
+  });
 }
 
 export function resizeOpening(project: TileProject, openingId: string, patch: Pick<Opening, 'xMm' | 'yMm' | 'widthMm' | 'heightMm'>): TileProject {
@@ -877,7 +952,7 @@ export function addPartition(project: TileProject, start?: PointMm, end?: PointM
 export function movePartition(project: TileProject, partitionId: string, start: PointMm, end: PointMm): TileProject {
   const normalized = ensureProjectDefaults(project);
   const partition = normalized.room.partitions?.find((item) => item.id === partitionId);
-  if (!partition || (start.x !== end.x && start.y !== end.y) || segmentLength(start, end) < 250) return normalized;
+  if (!partition || segmentLength(start, end) < 250) return normalized;
   return updatePartition(normalized, partitionId, (item) => ({ ...item, start: { x: Math.round(start.x), y: Math.round(start.y) }, end: { x: Math.round(end.x), y: Math.round(end.y) } }));
 }
 
@@ -1423,6 +1498,39 @@ function translatePoint(point: PointMm, deltaXmm: number, deltaYmm: number): Poi
 
 function translateContour(contour: PointMm[], deltaXmm: number, deltaYmm: number): PointMm[] {
   return contour.map((point) => translatePoint(point, deltaXmm, deltaYmm));
+}
+
+function keepProjectInsidePlanCanvas(project: TileProject): TileProject {
+  const areas = project.room.areas ?? [];
+  if (!areas.length) return project;
+  const bounds = getBoundingBox(areas.flatMap((area) => area.contour));
+  const deltaXmm = bounds.minX < 0 ? Math.ceil(-bounds.minX) : 0;
+  const deltaYmm = bounds.minY < 0 ? Math.ceil(-bounds.minY) : 0;
+  if (!deltaXmm && !deltaYmm) return project;
+
+  const room = normalizeRoomModel({
+    ...project.room,
+    contour: translateContour(project.room.contour, deltaXmm, deltaYmm),
+    areas: areas.map((area) => ({ ...area, contour: translateContour(area.contour, deltaXmm, deltaYmm) })),
+    partitions: project.room.partitions?.map((partition) => ({
+      ...partition,
+      start: translatePoint(partition.start, deltaXmm, deltaYmm),
+      end: translatePoint(partition.end, deltaXmm, deltaYmm),
+    })),
+  });
+  const materialId = getPrimaryMaterial(project)?.id ?? null;
+  return {
+    ...project,
+    room,
+    objects: project.objects.map((object) => ({
+      ...object,
+      initialXmm: object.initialXmm + deltaXmm,
+      initialYmm: object.initialYmm + deltaYmm,
+      xMm: object.xMm + deltaXmm,
+      yMm: object.yMm + deltaYmm,
+    })),
+    surfaces: createSurfacesWithAssignments(room, project, materialId),
+  };
 }
 
 function polygonsOverlapInterior(first: PointMm[], second: PointMm[]): boolean {

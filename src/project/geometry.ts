@@ -138,13 +138,35 @@ export function moveWall(contour: PointMm[], segmentIndex: number, deltaMm: numb
   return validateContour(normalized).ok ? normalized : contour;
 }
 
+export function resizeSquareContour(contour: PointMm[], sideMm: number): PointMm[] {
+  if (!isAxisAlignedRectangle(contour)) return contour;
+  const side = clampInteger(sideMm, MIN_SIDE_MM, MAX_SIDE_MM);
+  const box = getBoundingBox(contour);
+  const resized = contour.map((point) => ({
+    x: point.x === box.maxX ? box.minX + side : box.minX,
+    y: point.y === box.maxY ? box.minY + side : box.minY,
+  }));
+  return validateContour(resized).ok ? resized : contour;
+}
+
+export function moveSquareWall(contour: PointMm[], segmentIndex: number, deltaMm: number): PointMm[] {
+  if (!isAxisAlignedRectangle(contour)) return moveWall(contour, segmentIndex, deltaMm);
+  const current = contour[segmentIndex];
+  const next = contour[(segmentIndex + 1) % contour.length];
+  const moved = moveWall(contour, segmentIndex, deltaMm);
+  const movedBox = getBoundingBox(moved);
+  const side = current.x === next.x ? movedBox.width : movedBox.height;
+  return resizeSquareContour(moved, side);
+}
+
 export function normalizeRoomAreas(room: Room): RoomArea[] {
-  const areas = room.areas?.length ? room.areas : [{ id: 'room-1', name: 'Помещение 1', contour: room.contour }];
+  const areas = room.areas?.length ? room.areas : [{ id: 'room-1', name: 'Помещение 1', contour: room.contour, templateId: room.templateId }];
   return areas.map((area, index) => ({
     id: area.id || `room-${index + 1}`,
     name: area.name || `Помещение ${index + 1}`,
     heightMm: area.heightMm ?? room.heightMm,
     shapeLocked: area.shapeLocked,
+    templateId: area.templateId ?? (index === 0 ? room.templateId : null),
     contour: area.contour?.length ? area.contour : room.contour,
   }));
 }
@@ -187,7 +209,7 @@ export function createSurfacesFromRoom(roomInput: Room, materialId?: string | nu
         heightMm,
         id,
         materialId,
-        name: `${partition.name || `Перегородка ${partitionIndex + 1}`} — ${side === 'a' ? 'сторона 1' : 'сторона 2'}`,
+        name: `Перегородка ${partitionIndex + 1}.${side === 'a' ? 1 : 2}`,
         openings: room.openings?.filter((opening) => opening.surfaceId === id) ?? [],
         settings,
         sourceRef: `partition:${partition.id}:${side}`,
@@ -329,6 +351,19 @@ function onSegment(a: PointMm, b: PointMm, point: PointMm): boolean {
 
 function clampInteger(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function isAxisAlignedRectangle(contour: PointMm[]): boolean {
+  if (contour.length !== 4) return false;
+  const box = getBoundingBox(contour);
+  if (box.width <= 0 || box.height <= 0) return false;
+  const corners = new Set(contour.map((point) => `${point.x}:${point.y}`));
+  return corners.size === 4
+    && contour.every((point) => (point.x === box.minX || point.x === box.maxX) && (point.y === box.minY || point.y === box.maxY))
+    && contour.every((point, index) => {
+      const next = contour[(index + 1) % contour.length];
+      return point.x === next.x || point.y === next.y;
+    });
 }
 
 function normalizeContour(contour: PointMm[]): PointMm[] {

@@ -16,6 +16,7 @@ describe('calculateProject', () => {
     expect(result.materials.some((item) => item.material.presetId === '600x600')).toBe(true);
     expect(result.totalPurchasePieces).toBeGreaterThan(result.fullPieces);
     expect(result.totalAreaM2).toBeGreaterThan(0);
+    expect(result.totalAreaM2).toBeCloseTo(calculateProject(project).totalAreaM2, 1);
   });
 
   it('includes wall zones and package box estimates', () => {

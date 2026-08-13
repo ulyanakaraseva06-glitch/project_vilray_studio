@@ -3,7 +3,7 @@ import { clampZoom, panViewport, resetViewport } from './viewport';
 
 describe('canvas viewport', () => {
   it('clamps zoom to supported limits', () => {
-    expect(clampZoom(0.1)).toBe(0.65);
+    expect(clampZoom(0.1)).toBe(0.35);
     expect(clampZoom(3)).toBe(2.2);
     expect(clampZoom(1.234)).toBe(1.23);
   });

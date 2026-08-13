@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { templates } from '../config/appConfig';
+import { getBoundingBox } from './geometry';
 import {
   addAdjacentRoom,
   addRoomFromTemplate,
@@ -16,6 +17,7 @@ import {
   confirmRoomAreaDimensions,
   deleteOpening,
   deletePartition,
+  deleteRoomArea,
   deleteRoomObject,
   deleteZone,
   ensureProjectDefaults,
@@ -59,6 +61,17 @@ describe('project factory', () => {
     expect(colored.surfaces.find((surface) => surface.id === 'surface-wall-1')?.zones[0].materialId).toBe(project.surfaces.find((surface) => surface.id === 'surface-wall-1')?.zones[0].materialId);
   });
 
+  it('saves a named color and reuses it on another surface with the same tile format', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const floorZoneId = project.surfaces.find((surface) => surface.id === 'surface-floor')!.zones[0].id;
+    const wallZoneId = project.surfaces.find((surface) => surface.id === 'surface-wall-1')!.zones[0].id;
+    const floorColored = updateZoneTileColor(project, 'surface-floor', floorZoneId, '#F2D7D9', 'Пудровый');
+    const bothColored = updateZoneTileColor(floorColored, 'surface-wall-1', wallZoneId, '#F2D7D9', 'Пудровый');
+
+    expect(getZoneMaterial(bothColored, 'surface-floor', floorZoneId)?.name).toBe('Пудровый');
+    expect(getZoneMaterial(bothColored, 'surface-wall-1', wallZoneId)?.id).toBe(getZoneMaterial(bothColored, 'surface-floor', floorZoneId)?.id);
+  });
+
   it('locks a ready room after its wall dimensions are confirmed once', () => {
     const project = createProjectFromTemplate(templates[0], [1700, 2000]);
     const saved = confirmRoomAreaDimensions(project, 'room-1', [3000, 2400, 3000, 2400]);
@@ -67,6 +80,28 @@ describe('project factory', () => {
     expect(saved.error).toBeUndefined();
     expect(saved.project.room.areas?.[0]).toMatchObject({ shapeLocked: true });
     expect(repeated.project.room.areas?.[0]?.contour).toEqual(saved.project.room.areas?.[0]?.contour);
+  });
+
+  it('keeps the square template square while any wall is resized', () => {
+    const project = createProjectFromTemplate(templates[1], [1500, 1500]);
+    const dragged = moveRoomAreaWall(project, 'room-1', 1, 375);
+    const resizedByValue = updateRoomAreaSegmentLength(dragged, 'room-1', 0, 2100);
+    const draggedBox = getBoundingBox(dragged.room.areas![0].contour);
+    const resizedBox = getBoundingBox(resizedByValue.room.areas![0].contour);
+
+    expect(draggedBox.width).toBe(1875);
+    expect(draggedBox.height).toBe(1875);
+    expect(resizedBox.width).toBe(2100);
+    expect(resizedBox.height).toBe(2100);
+  });
+
+  it('keeps non-square templates resizing width and height independently', () => {
+    const project = createProjectFromTemplate(templates[0], [1500, 1700]);
+    const dragged = moveRoomAreaWall(project, 'room-1', 1, 375);
+    const box = getBoundingBox(dragged.room.areas![0].contour);
+
+    expect(box.width).toBe(1875);
+    expect(box.height).toBe(1700);
   });
 
   it('creates schema version 1 project from template', () => {
@@ -165,6 +200,16 @@ describe('project factory', () => {
     expect(layout).toMatchObject({ originMode: 'corner-br', pattern: 'half-offset' });
   });
 
+  it('keeps the selected tile size when diagonal layout is enabled', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const sized = updateSurfaceTileMaterial(project, 'surface-floor', { id: '200x600', label: '20×60', widthMm: 200, heightMm: 600 });
+    const floor = sized.surfaces.find((surface) => surface.id === 'surface-floor')!;
+    const updated = updateZoneLayoutPattern(sized, floor.id, floor.zones[0].id, 'diagonal');
+
+    expect(getZoneMaterial(updated, floor.id, floor.zones[0].id)).toMatchObject({ widthMm: 200, heightMm: 600 });
+    expect(updated.surfaces.find((surface) => surface.id === floor.id)?.zones[0].layout.pattern).toBe('diagonal');
+  });
+
   it('stores manual layout offset for one surface', () => {
     const project = createProjectFromTemplate(templates[0], [1700, 2000]);
     const updated = updateSurfaceLayoutOffset(project, 'surface-floor', 20, -10);
@@ -234,13 +279,13 @@ describe('project factory', () => {
     expect(updated.surfaces.find((surface) => surface.id === 'surface-floor-room-2')?.zones).toHaveLength(2);
   });
 
-  it('stores manually drawn floor and wall rectangles', () => {
+  it('stores manually drawn floor and wall polygons as locked zones', () => {
     const project = createProjectFromTemplate(templates[0], [1700, 2000]);
     const floorResult = addManualZone(project, 'surface-floor', [{ x: 100, y: 100 }, { x: 900, y: 100 }, { x: 700, y: 800 }]);
-    const wallResult = addManualZone(floorResult.project, 'surface-wall-1', [{ x: 250, y: 300 }, { x: 1250, y: 1700 }]);
+    const wallResult = addManualZone(floorResult.project, 'surface-wall-1', [{ x: 250, y: 300 }, { x: 1250, y: 300 }, { x: 1250, y: 1700 }, { x: 250, y: 1700 }]);
 
-    expect(floorResult.zone?.shape).toMatchObject({ type: 'rect', xMm: 100, yMm: 100, widthMm: 800, heightMm: 700 });
-    expect(wallResult.zone?.shape).toMatchObject({ type: 'rect', xMm: 250, yMm: 300, widthMm: 1000, heightMm: 1400 });
+    expect(floorResult.zone).toMatchObject({ locked: true, shape: { type: 'polygon', points: [{ x: 100, y: 100 }, { x: 900, y: 100 }, { x: 700, y: 800 }] } });
+    expect(wallResult.zone).toMatchObject({ locked: true, shape: { type: 'polygon', points: [{ x: 250, y: 300 }, { x: 1250, y: 300 }, { x: 1250, y: 1700 }, { x: 250, y: 1700 }] } });
   });
 
   it('does not delete base zones but deletes extra zones', () => {
@@ -354,6 +399,18 @@ describe('project factory', () => {
     expect(getCenter(movedFixedOpening.id)).toEqual(getCenter(movedSourceOpening.id));
   });
 
+  it('keeps rooms visible when a door connection places one room above the plan origin', () => {
+    const project = addRoomFromTemplate(createProjectFromTemplate(templates[0], [1700, 2000]), templates[0], [1200, 1600]);
+    const first = addOpeningDetailed(project, 'surface-wall-1', 'door');
+    const second = addOpeningDetailed(first.project, 'surface-wall-room-2-3', 'door');
+    const connected = connectRoomOpenings(second.project, second.opening!.id, first.opening!.id);
+    const bounds = getBoundingBox(connected.project.room.areas!.flatMap((area) => area.contour));
+
+    expect(connected.error).toBeUndefined();
+    expect(bounds.minX).toBeGreaterThanOrEqual(0);
+    expect(bounds.minY).toBeGreaterThanOrEqual(0);
+  });
+
   it('keeps a separate wall height for each room', () => {
     const project = addRoomFromTemplate(createProjectFromTemplate(templates[0], [1700, 2000]), templates[0], [1200, 1600]);
     const updated = updateRoomAreaHeight(project, 'room-2', 3200);
@@ -374,6 +431,21 @@ describe('project factory', () => {
     expect(resized.surfaces.find((surface) => surface.id === 'surface-wall-room-2-1')?.widthMm).toBe(2100);
     expect(dragged.room.areas![0].contour).toEqual(firstContour);
     expect(dragged.room.areas![1].contour).not.toEqual(resized.room.areas![1].contour);
+  });
+
+  it('deletes a selected room together with its walls, openings, partitions and objects', () => {
+    const base = addRoomFromTemplate(createProjectFromTemplate(templates[0], [1700, 2000]), templates[0], [1600, 1900]);
+    const withDoor = addOpeningDetailed(base, 'surface-wall-room-2-1', 'door').project;
+    const withPartition = addPartition(withDoor, { x: 2400, y: 200 }, { x: 2400, y: 900 }, 'room-2');
+    const withObject = addRoomObject(withPartition, { areaId: 'room-2', heightMm: 500, lengthMm: 300, name: 'Шкаф', widthMm: 300 }).project;
+    const deleted = deleteRoomArea(withObject, 'room-2');
+
+    expect(deleted.error).toBeUndefined();
+    expect(deleted.project.room.areas).toHaveLength(1);
+    expect(deleted.project.room.openings).toHaveLength(0);
+    expect(deleted.project.room.partitions).toHaveLength(0);
+    expect(deleted.project.objects).toHaveLength(0);
+    expect(deleted.project.surfaces.some((surface) => surface.sourceRef?.includes('room-2'))).toBe(false);
   });
 
   it('adds doors and partitions as project geometry', () => {
@@ -435,12 +507,14 @@ describe('project factory', () => {
     const withPartition = addPartition(project, { x: 0, y: 500 }, { x: 900, y: 500 }, 'room-1');
     const partition = withPartition.room.partitions![0];
     const moved = movePartition(withPartition, partition.id, { x: 0, y: 650 }, { x: 900, y: 650 });
-    const reset = resetPartition(moved, partition.id);
+    const rotated = movePartition(moved, partition.id, { x: 250, y: 300 }, { x: 850, y: 900 });
+    const reset = resetPartition(rotated, partition.id);
     const deleted = deletePartition(reset, partition.id);
 
     expect(partition).toMatchObject({ areaId: 'room-1', start: { x: 0, y: 500 }, end: { x: 900, y: 500 } });
     expect(withPartition.surfaces.filter((surface) => surface.sourceRef?.startsWith(`partition:${partition.id}`))).toHaveLength(2);
     expect(moved.room.partitions![0]).toMatchObject({ start: { x: 0, y: 650 }, end: { x: 900, y: 650 } });
+    expect(rotated.room.partitions![0]).toMatchObject({ start: { x: 250, y: 300 }, end: { x: 850, y: 900 } });
     expect(reset.room.partitions![0]).toMatchObject({ start: { x: 0, y: 500 }, end: { x: 900, y: 500 } });
     expect(deleted.room.partitions).toHaveLength(0);
     expect(deleted.surfaces.some((surface) => surface.sourceRef?.startsWith(`partition:${partition.id}`))).toBe(false);
@@ -452,6 +526,14 @@ describe('project factory', () => {
     const updated = addAdjacentRoom(assigned);
 
     expect(getSurfaceMaterial(updated, 'surface-wall-2')).toMatchObject({ presetId: '600x600' });
+  });
+
+  it('preserves the first room tile offsets when another room is added', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const shifted = updateSurfaceLayoutOffset(project, 'surface-floor', 137, -64);
+    const updated = addRoomFromTemplate(shifted, templates[0], [1200, 1500]);
+
+    expect(updated.surfaces.find((surface) => surface.id === 'surface-floor')?.zones[0].layout).toMatchObject({ originMode: 'manual', originXmm: 137, originYmm: -64 });
   });
 
   it('adds, constrains, resets and deletes a room object', () => {

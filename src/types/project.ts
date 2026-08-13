@@ -73,6 +73,8 @@ export interface FinishZone {
   id: string;
   name: string;
   shape: ZoneShape;
+  /** Manual polygon zones are fixed after the user saves their contour. */
+  locked?: boolean;
   materialId: string | null;
   layout: LayoutSettings;
   manualEdits: ManualTileEdit[];
@@ -101,6 +103,8 @@ export interface RoomArea {
   contour: PointMm[];
   heightMm?: number;
   shapeLocked?: boolean;
+  /** Keeps template-specific editing rules for each room, including added rooms. */
+  templateId?: string | null;
 }
 
 export interface Opening {
