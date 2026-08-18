@@ -11,6 +11,13 @@ const config = {
         main: resolve(__dirname, 'index.html'),
         app: resolve(__dirname, 'app/index.html'),
       },
+      output: {
+        manualChunks: {
+          canvas: ['konva', 'react-konva'],
+          icons: ['lucide-react'],
+          react: ['react', 'react-dom'],
+        },
+      },
     },
   },
   test: {

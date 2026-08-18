@@ -101,7 +101,7 @@ export function validateDraftPoint(points: PointMm[], nextPoint: PointMm): strin
   return null;
 }
 
-export function buildClosedContour(points: PointMm[]): PointMm[] | null {
+export function buildClosedContour(points: PointMm[], normalize = true): PointMm[] | null {
   const openPoints = removeRepeatedClosingPoint(points);
   if (!canCloseContour(openPoints)) return null;
   const first = openPoints[0];
@@ -111,10 +111,10 @@ export function buildClosedContour(points: PointMm[]): PointMm[] | null {
   for (let index = 1; index < openPoints.length - 2; index += 1) {
     if (segmentsIntersect(openPoints[index], openPoints[index + 1], last, first)) return null;
   }
-  return normalizeDraftContour(openPoints);
+  return normalize ? normalizeDraftContour(openPoints) : openPoints;
 }
 
-export function buildClosedOrthogonalContour(points: PointMm[]): PointMm[] | null {
+export function buildClosedOrthogonalContour(points: PointMm[], normalize = true): PointMm[] | null {
   const openPoints = removeRepeatedClosingPoint(points);
   if (!canCloseContour(openPoints)) return null;
   const first = openPoints[0];
@@ -122,7 +122,7 @@ export function buildClosedOrthogonalContour(points: PointMm[]): PointMm[] | nul
   if (!last) return null;
   const closed = first.x === last.x || first.y === last.y ? openPoints : [...openPoints, { x: first.x, y: last.y }];
   if (closed.some((point, index) => distance(point, closed[(index + 1) % closed.length]) < CUSTOM_DRAW_MIN_SIDE_MM)) return null;
-  return normalizeDraftContour(closed);
+  return normalize ? normalizeDraftContour(closed) : closed;
 }
 
 function removeRepeatedClosingPoint(points: PointMm[]): PointMm[] {

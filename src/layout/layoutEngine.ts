@@ -3,6 +3,7 @@ import type { LayoutSettings, PointMm, RectZone } from '../types/project';
 export type LayoutPieceKind = 'full' | 'cut' | 'critical';
 
 export interface LayoutTilePiece {
+  areaMm2?: number;
   col: number;
   heightMm: number;
   id: string;
@@ -55,11 +56,20 @@ export interface RectLayoutResult {
 
 const DEFAULT_MAX_PIECES = 1200;
 const EPSILON_MM = 0.5;
+const LAYOUT_CACHE_LIMIT = 80;
+const layoutCache = new Map<string, RectLayoutResult>();
 
 export function generateRectLayout(input: RectLayoutInput): RectLayoutResult {
+  const cacheKey = `rect:${JSON.stringify(input)}`;
+  const cached = getCachedLayout(cacheKey);
+  if (cached) return cached;
+  return cacheLayout(cacheKey, generateRectLayoutUncached(input));
+}
+
+function generateRectLayoutUncached(input: RectLayoutInput): RectLayoutResult {
   const surfaceWidth = Math.max(0, input.widthMm);
   const surfaceHeight = Math.max(0, input.heightMm);
-  const tile = getOrientedTile(input.tileWidthMm, input.tileHeightMm, input.layout.rotation, input.layout.pattern === 'diagonal');
+  const tile = getPatternTile(input.tileWidthMm, input.tileHeightMm, input.layout.rotation, input.layout.pattern);
   const grout = Math.max(0, input.layout.groutMm);
   const stepX = tile.widthMm + grout;
   const stepY = tile.heightMm + grout;
@@ -71,12 +81,20 @@ export function generateRectLayout(input: RectLayoutInput): RectLayoutResult {
     return summarizePieces(pieces, false);
   }
 
+  if (input.layout.pattern === 'diagonal' || input.layout.pattern === 'herringbone') {
+    return generateAngledLayout(input, tile, origin, maxPieces);
+  }
+
+  if (input.layout.pattern === 'wood-random') {
+    return generateDeckLayout(input, tile, origin, maxPieces);
+  }
+
   const startY = normalizeStart(origin.yMm, stepY);
   let truncated = false;
   let row = 0;
 
   for (let tileY = startY; tileY < surfaceHeight; tileY += stepY, row += 1) {
-    const rowOffset = getPatternRowOffset(input.layout.pattern, row, stepX);
+    const rowOffset = getPatternRowOffset(input.layout.pattern, input.layout.stagger, row, stepX);
     const startX = normalizeStart(origin.xMm + rowOffset, stepX);
     let col = 0;
 
@@ -87,6 +105,7 @@ export function generateRectLayout(input: RectLayoutInput): RectLayoutResult {
       const visibleParts = subtractBlockedRects(visible, input.blockedRects ?? []);
       for (const [partIndex, part] of visibleParts.entries()) {
         pieces.push({
+          areaMm2: part.widthMm * part.heightMm,
           col,
           heightMm: part.heightMm,
           id: `r${row}-c${col}${visibleParts.length > 1 ? `-p${partIndex}` : ''}`,
@@ -108,7 +127,235 @@ export function generateRectLayout(input: RectLayoutInput): RectLayoutResult {
   return summarizePieces(pieces, truncated);
 }
 
+function generateDeckLayout(
+  input: RectLayoutInput,
+  tile: { heightMm: number; widthMm: number },
+  origin: { xMm: number; yMm: number },
+  maxPieces: number,
+): RectLayoutResult {
+  const surfaceWidth = Math.max(0, input.widthMm);
+  const surfaceHeight = Math.max(0, input.heightMm);
+  const grout = Math.max(0, input.layout.groutMm);
+  const stepX = tile.widthMm + grout;
+  const stepY = tile.heightMm + grout;
+  const startX = normalizeStart(origin.xMm, stepX);
+  const pieces: LayoutTilePiece[] = [];
+  let truncated = false;
+
+  for (let tileX = startX; tileX < surfaceWidth; tileX += stepX) {
+    const columnIndex = Math.round((tileX - origin.xMm) / stepX);
+    const columnOffset = input.layout.stagger && input.layout.stagger !== 'none'
+      ? getExplicitStaggerOffset(input.layout.stagger, columnIndex, stepY)
+      : getDeckColumnOffset(columnIndex, stepY);
+    const startY = normalizeStart(origin.yMm + columnOffset, stepY);
+    let row = 0;
+
+    for (let tileY = startY; tileY < surfaceHeight; tileY += stepY, row += 1) {
+      const visible = intersectTile(tileX, tileY, tile.widthMm, tile.heightMm, surfaceWidth, surfaceHeight);
+      if (!visible) continue;
+
+      const visibleParts = subtractBlockedRects(visible, input.blockedRects ?? []);
+      for (const [partIndex, part] of visibleParts.entries()) {
+        pieces.push({
+          areaMm2: part.widthMm * part.heightMm,
+          col: columnIndex,
+          heightMm: part.heightMm,
+          id: `deck-c${columnIndex}-r${row}${visibleParts.length > 1 ? `-p${partIndex}` : ''}`,
+          kind: classifyPiece(part.widthMm, part.heightMm, tile.widthMm, tile.heightMm, input.layout.criticalCutMm),
+          row,
+          widthMm: part.widthMm,
+          xMm: part.xMm,
+          yMm: part.yMm,
+        });
+      }
+
+      if (pieces.length >= maxPieces) {
+        truncated = true;
+        return summarizePieces(pieces, truncated);
+      }
+    }
+  }
+
+  return summarizePieces(pieces, truncated);
+}
+
+function generateAngledLayout(
+  input: RectLayoutInput,
+  tile: { heightMm: number; widthMm: number },
+  origin: { xMm: number; yMm: number },
+  maxPieces: number,
+): RectLayoutResult {
+  const pieces: LayoutTilePiece[] = [];
+  const fullAreaMm2 = tile.widthMm * tile.heightMm;
+  let truncated = false;
+
+  const appendTile = (polygon: PointMm[], row: number, col: number, id: string) => {
+    const visibleParts = clipTileToAvailableArea(polygon, input.widthMm, input.heightMm, input.blockedRects ?? []);
+    for (const [partIndex, part] of visibleParts.entries()) {
+      const box = getBoundingBox(part);
+      const areaMm2 = polygonArea(part);
+      pieces.push({
+        areaMm2,
+        col,
+        heightMm: box.height,
+        id: `${id}${visibleParts.length > 1 ? `-p${partIndex}` : ''}`,
+        kind: classifyPolygonPiece(areaMm2, box.width, box.height, fullAreaMm2, input.layout.criticalCutMm),
+        polygon: part,
+        row,
+        widthMm: box.width,
+        xMm: box.minX,
+        yMm: box.minY,
+      });
+      if (pieces.length >= maxPieces) {
+        truncated = true;
+        return false;
+      }
+    }
+    return true;
+  };
+
+  if (input.layout.pattern === 'herringbone') {
+    const longSide = Math.max(tile.widthMm, tile.heightMm);
+    const shortSide = Math.min(tile.widthMm, tile.heightMm);
+    const angle = Math.PI / 4;
+    const cosine = Math.cos(angle);
+    const sine = Math.sin(angle);
+    const surfaceCorners = [
+      { x: 0, y: 0 },
+      { x: input.widthMm, y: 0 },
+      { x: input.widthMm, y: input.heightMm },
+      { x: 0, y: input.heightMm },
+    ];
+    const localCorners = surfaceCorners.map((point) => {
+      const dx = point.x - origin.xMm;
+      const dy = point.y - origin.yMm;
+      return { x: dx * cosine + dy * sine, y: -dx * sine + dy * cosine };
+    });
+    const localMinX = Math.min(...localCorners.map((point) => point.x)) - longSide - shortSide;
+    const localMaxX = Math.max(...localCorners.map((point) => point.x)) + longSide + shortSide;
+    const localMinY = Math.min(...localCorners.map((point) => point.y)) - longSide - shortSide;
+    const localMaxY = Math.max(...localCorners.map((point) => point.y)) + longSide + shortSide;
+    const firstRow = Math.floor(localMinY / shortSide) - 1;
+    const lastRow = Math.ceil(localMaxY / shortSide) + 1;
+    const rotatePoint = (point: PointMm): PointMm => ({
+      x: origin.xMm + point.x * cosine - point.y * sine,
+      y: origin.yMm + point.x * sine + point.y * cosine,
+    });
+
+    for (let row = firstRow; row <= lastRow && !truncated; row += 1) {
+      const y = row * shortSide;
+      const rowStart = -row * shortSide;
+      const firstPair = Math.floor((localMinX - rowStart) / (2 * longSide)) - 1;
+      const lastPair = Math.ceil((localMaxX - rowStart) / (2 * longSide)) + 1;
+
+      for (let pair = firstPair; pair <= lastPair && !truncated; pair += 1) {
+        const x = rowStart + pair * 2 * longSide;
+        const horizontal = [
+          { x, y },
+          { x: x + longSide, y },
+          { x: x + longSide, y: y + shortSide },
+          { x, y: y + shortSide },
+        ].map(rotatePoint);
+        const verticalX = x + longSide;
+        const vertical = [
+          { x: verticalX, y },
+          { x: verticalX + shortSide, y },
+          { x: verticalX + shortSide, y: y + longSide },
+          { x: verticalX, y: y + longSide },
+        ].map(rotatePoint);
+        if (!appendTile(horizontal, row, pair * 2, `h-r${row}-p${pair}-horizontal`)) break;
+        if (!appendTile(vertical, row, pair * 2 + 1, `h-r${row}-p${pair}-vertical`)) break;
+      }
+    }
+    return summarizePieces(pieces, truncated);
+  }
+
+  const angle = Math.PI / 4;
+  const horizontal = { x: Math.cos(angle), y: Math.sin(angle) };
+  const vertical = { x: -Math.sin(angle), y: Math.cos(angle) };
+  const stepX = tile.widthMm + Math.max(0, input.layout.groutMm);
+  const stepY = tile.heightMm + Math.max(0, input.layout.groutMm);
+  const corners = [
+    { x: 0, y: 0 },
+    { x: input.widthMm, y: 0 },
+    { x: input.widthMm, y: input.heightMm },
+    { x: 0, y: input.heightMm },
+  ];
+  const projectedX = corners.map((point) => ((point.x - origin.xMm) * horizontal.x + (point.y - origin.yMm) * horizontal.y) / stepX);
+  const projectedY = corners.map((point) => ((point.x - origin.xMm) * vertical.x + (point.y - origin.yMm) * vertical.y) / stepY);
+  const firstCol = Math.floor(Math.min(...projectedX)) - 1;
+  const lastCol = Math.ceil(Math.max(...projectedX)) + 1;
+  const firstRow = Math.floor(Math.min(...projectedY)) - 1;
+  const lastRow = Math.ceil(Math.max(...projectedY)) + 1;
+
+  for (let row = firstRow; row <= lastRow && !truncated; row += 1) {
+    for (let col = firstCol; col <= lastCol && !truncated; col += 1) {
+      const stagger = getExplicitStaggerOffset(input.layout.stagger, row, stepX);
+      const alongRow = col * stepX + stagger;
+      const anchor = {
+        x: origin.xMm + alongRow * horizontal.x + row * stepY * vertical.x,
+        y: origin.yMm + alongRow * horizontal.y + row * stepY * vertical.y,
+      };
+      const polygon = [
+        anchor,
+        { x: anchor.x + tile.widthMm * horizontal.x, y: anchor.y + tile.widthMm * horizontal.y },
+        { x: anchor.x + tile.widthMm * horizontal.x + tile.heightMm * vertical.x, y: anchor.y + tile.widthMm * horizontal.y + tile.heightMm * vertical.y },
+        { x: anchor.x + tile.heightMm * vertical.x, y: anchor.y + tile.heightMm * vertical.y },
+      ];
+      appendTile(polygon, row, col, `d-r${row}-c${col}`);
+    }
+  }
+  return summarizePieces(pieces, truncated);
+}
+
+function clipTileToAvailableArea(polygon: PointMm[], widthMm: number, heightMm: number, blockedRects: RectZone[]): PointMm[][] {
+  const surface = { heightMm, widthMm, xMm: 0, yMm: 0 };
+  const blockers = blockedRects.map((blocker) => intersectRects(surface, blocker)).filter((blocker): blocker is RectZone => Boolean(blocker));
+  if (!blockers.length) {
+    const clipped = clipPolygonByConvexPolygon(polygon, rectToPolygon(surface));
+    return clipped.length >= 3 && polygonArea(clipped) > EPSILON_MM ? [clipped] : [];
+  }
+
+  const xs = [0, widthMm, ...blockers.flatMap((blocker) => [blocker.xMm, blocker.xMm + blocker.widthMm])];
+  const ys = [0, heightMm, ...blockers.flatMap((blocker) => [blocker.yMm, blocker.yMm + blocker.heightMm])];
+  const sortedX = [...new Set(xs.map((value) => Math.max(0, Math.min(widthMm, value))))].sort((a, b) => a - b);
+  const sortedY = [...new Set(ys.map((value) => Math.max(0, Math.min(heightMm, value))))].sort((a, b) => a - b);
+  const parts: PointMm[][] = [];
+  for (let yIndex = 0; yIndex < sortedY.length - 1; yIndex += 1) {
+    for (let xIndex = 0; xIndex < sortedX.length - 1; xIndex += 1) {
+      const cell = { xMm: sortedX[xIndex], yMm: sortedY[yIndex], widthMm: sortedX[xIndex + 1] - sortedX[xIndex], heightMm: sortedY[yIndex + 1] - sortedY[yIndex] };
+      if (cell.widthMm <= EPSILON_MM || cell.heightMm <= EPSILON_MM) continue;
+      const center = { x: cell.xMm + cell.widthMm / 2, y: cell.yMm + cell.heightMm / 2 };
+      if (blockers.some((blocker) => center.x > blocker.xMm && center.x < blocker.xMm + blocker.widthMm && center.y > blocker.yMm && center.y < blocker.yMm + blocker.heightMm)) continue;
+      const clipped = clipPolygonByConvexPolygon(polygon, rectToPolygon(cell));
+      if (clipped.length >= 3 && polygonArea(clipped) > EPSILON_MM) parts.push(clipped);
+    }
+  }
+  return parts;
+}
+
+function classifyPolygonPiece(areaMm2: number, widthMm: number, heightMm: number, fullAreaMm2: number, criticalCutMm: number): LayoutPieceKind {
+  if (Math.abs(areaMm2 - fullAreaMm2) <= Math.max(EPSILON_MM, fullAreaMm2 * 0.001)) return 'full';
+  if (Math.min(widthMm, heightMm) < Math.max(1, criticalCutMm)) return 'critical';
+  return 'cut';
+}
+
+function classifyClippedPolygonPiece(source: LayoutTilePiece, clippedAreaMm2: number, clippedBox: ReturnType<typeof getBoundingBox>, criticalCutMm: number): LayoutPieceKind {
+  const sourceAreaMm2 = source.areaMm2 ?? source.widthMm * source.heightMm;
+  if (Math.abs(clippedAreaMm2 - sourceAreaMm2) <= Math.max(EPSILON_MM, sourceAreaMm2 * 0.001)) return source.kind;
+  if (Math.min(clippedBox.width, clippedBox.height) < Math.max(1, criticalCutMm)) return 'critical';
+  return 'cut';
+}
+
 export function generatePolygonLayout(input: PolygonLayoutInput): RectLayoutResult {
+  const cacheKey = `polygon:${JSON.stringify(input)}`;
+  const cached = getCachedLayout(cacheKey);
+  if (cached) return cached;
+  const result = generatePolygonLayoutUncached(input);
+  return cacheLayout(cacheKey, result);
+}
+
+function generatePolygonLayoutUncached(input: PolygonLayoutInput): RectLayoutResult {
   const box = getBoundingBox(input.points);
   const normalizedPolygon = input.points.map((point) => ({ x: point.x - box.minX, y: point.y - box.minY }));
   const cells = decomposeOrthogonalPolygon(input.points, box);
@@ -125,13 +372,16 @@ export function generatePolygonLayout(input: PolygonLayoutInput): RectLayoutResu
 
   if (isConvexPolygon(normalizedPolygon)) {
     for (const piece of rectResult.pieces) {
-      const clippedPolygon = clipPolygonByConvexPolygon(rectToPolygon(piece), normalizedPolygon);
+      const sourcePolygon = piece.polygon?.length ? piece.polygon : rectToPolygon(piece);
+      const clippedPolygon = clipPolygonByConvexPolygon(sourcePolygon, normalizedPolygon);
       if (clippedPolygon.length < 3 || polygonArea(clippedPolygon) <= EPSILON_MM) continue;
       const clippedBox = getBoundingBox(clippedPolygon);
+      const clippedAreaMm2 = polygonArea(clippedPolygon);
       pieces.push({
         ...piece,
+        areaMm2: clippedAreaMm2,
         heightMm: clippedBox.height,
-        kind: classifyPiece(clippedBox.width, clippedBox.height, piece.widthMm, piece.heightMm, input.layout.criticalCutMm),
+        kind: classifyClippedPolygonPiece(piece, clippedAreaMm2, clippedBox, input.layout.criticalCutMm),
         polygon: clippedPolygon,
         widthMm: clippedBox.width,
         xMm: clippedBox.minX,
@@ -142,26 +392,47 @@ export function generatePolygonLayout(input: PolygonLayoutInput): RectLayoutResu
   }
 
   for (const piece of rectResult.pieces) {
+    const sourcePolygon = piece.polygon?.length ? piece.polygon : rectToPolygon(piece);
     for (const cell of cells) {
-      const clipped = intersectRects(
-        { heightMm: piece.heightMm, widthMm: piece.widthMm, xMm: piece.xMm, yMm: piece.yMm },
-        cell,
-      );
-      if (!clipped) continue;
+      const clippedPolygon = clipPolygonByConvexPolygon(sourcePolygon, rectToPolygon(cell));
+      if (clippedPolygon.length < 3) continue;
+      const clippedAreaMm2 = polygonArea(clippedPolygon);
+      if (clippedAreaMm2 <= EPSILON_MM) continue;
+      const clipped = getBoundingBox(clippedPolygon);
       pieces.push({
         ...piece,
-        heightMm: clipped.heightMm,
+        areaMm2: clippedAreaMm2,
+        heightMm: clipped.height,
         id: `${piece.id}-${cell.id}`,
-        kind: classifyPiece(clipped.widthMm, clipped.heightMm, piece.widthMm, piece.heightMm, input.layout.criticalCutMm),
-        polygon: rectToPolygon(clipped),
-        widthMm: clipped.widthMm,
-        xMm: clipped.xMm,
-        yMm: clipped.yMm,
+        kind: classifyClippedPolygonPiece(piece, clippedAreaMm2, clipped, input.layout.criticalCutMm),
+        polygon: clippedPolygon,
+        widthMm: clipped.width,
+        xMm: clipped.minX,
+        yMm: clipped.minY,
       });
     }
   }
 
   return summarizePieces(pieces, rectResult.truncated);
+}
+
+function getCachedLayout(key: string): RectLayoutResult | undefined {
+  const cached = layoutCache.get(key);
+  if (!cached) return undefined;
+  // Refresh insertion order so frequently used room layouts remain cached.
+  layoutCache.delete(key);
+  layoutCache.set(key, cached);
+  return cached;
+}
+
+function cacheLayout(key: string, result: RectLayoutResult): RectLayoutResult {
+  layoutCache.set(key, result);
+  while (layoutCache.size > LAYOUT_CACHE_LIMIT) {
+    const oldestKey = layoutCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    layoutCache.delete(oldestKey);
+  }
+  return result;
 }
 
 function isConvexPolygon(points: PointMm[]): boolean {
@@ -233,27 +504,48 @@ function polygonArea(points: PointMm[]): number {
 }
 
 export function getResolvedOrigin(layout: LayoutSettings, surfaceWidthMm: number, surfaceHeightMm: number, tileWidthMm: number, tileHeightMm: number) {
-  const tile = getOrientedTile(tileWidthMm, tileHeightMm, layout.rotation, layout.pattern === 'diagonal');
+  const tile = getPatternTile(tileWidthMm, tileHeightMm, layout.rotation, layout.pattern);
   const grout = Math.max(0, layout.groutMm);
   return resolveOrigin(layout, surfaceWidthMm, surfaceHeightMm, tile.widthMm, tile.heightMm, tile.widthMm + grout, tile.heightMm + grout);
 }
 
-function getOrientedTile(widthMm: number, heightMm: number, rotation: 0 | 90, diagonal = false) {
+function getOrientedTile(widthMm: number, heightMm: number, rotation: 0 | 90) {
   const width = Math.max(1, Math.round(widthMm));
   const height = Math.max(1, Math.round(heightMm));
-  const oriented = rotation === 90 ? { widthMm: height, heightMm: width } : { widthMm: width, heightMm: height };
-  if (!diagonal) return oriented;
-  const footprint = Math.max(1, Math.ceil((oriented.widthMm + oriented.heightMm) / Math.SQRT2));
-  return { widthMm: footprint, heightMm: footprint };
+  return rotation === 90 ? { widthMm: height, heightMm: width } : { widthMm: width, heightMm: height };
 }
 
-function getPatternRowOffset(pattern: LayoutSettings['pattern'], row: number, stepX: number): number {
-  if (pattern === 'half-offset') return row % 2 === 1 ? stepX / 2 : 0;
+function getPatternTile(widthMm: number, heightMm: number, rotation: 0 | 90, pattern: LayoutSettings['pattern']) {
+  const tile = getOrientedTile(widthMm, heightMm, rotation);
+  if (pattern === 'brick') {
+    return { widthMm: Math.max(tile.widthMm, tile.heightMm), heightMm: Math.min(tile.widthMm, tile.heightMm) };
+  }
+  if (pattern === 'wood-random') {
+    return { widthMm: Math.min(tile.widthMm, tile.heightMm), heightMm: Math.max(tile.widthMm, tile.heightMm) };
+  }
+  return tile;
+}
+
+function getPatternRowOffset(pattern: LayoutSettings['pattern'], stagger: LayoutSettings['stagger'], row: number, stepX: number): number {
+  const explicitOffset = getExplicitStaggerOffset(stagger, row, stepX);
+  if (stagger && stagger !== 'none') return explicitOffset;
+  if (pattern === 'brick' || pattern === 'half-offset') return row % 2 === 1 ? stepX / 2 : 0;
   if (pattern === 'third-offset') return (row % 3) * (stepX / 3);
   if (pattern === 'quarter-offset') return (row % 4) * (stepX / 4);
-  if (pattern === 'wood-random') return [0, 0.34, 0.67, 0.18, 0.5][row % 5] * stepX;
-  if (pattern === 'diagonal') return row % 2 === 1 ? stepX / 2 : 0;
   return 0;
+}
+
+function getExplicitStaggerOffset(stagger: LayoutSettings['stagger'], row: number, step: number): number {
+  if (stagger === 'half') return row % 2 === 1 ? step / 2 : 0;
+  if (stagger === 'third') return (row % 3) * (step / 3);
+  if (stagger === 'quarter') return (row % 4) * (step / 4);
+  return 0;
+}
+
+function getDeckColumnOffset(column: number, stepY: number): number {
+  const offsets = [0, 0.22, 0.52, 0.76, 0.36, 0.9];
+  const index = ((column % offsets.length) + offsets.length) % offsets.length;
+  return offsets[index] * stepY;
 }
 
 function resolveOrigin(layout: LayoutSettings, surfaceWidthMm: number, surfaceHeightMm: number, tileWidthMm: number, tileHeightMm: number, stepX: number, stepY: number) {
@@ -390,6 +682,13 @@ function calculateEdgeOffsets(edgeCuts: LayoutEdgeCuts): LayoutEdgeOffsets {
 
 function calculateEdgeCuts(pieces: LayoutTilePiece[]): LayoutEdgeCuts {
   if (!pieces.length) return { bottom: null, left: null, right: null, top: null };
+  // Floor zones (and any zone clipped to a non-rectangular contour) always
+  // produce polygon pieces even for a plain straight/brick pattern — the
+  // piece's xMm/yMm/widthMm/heightMm still describe its bounding box, so the
+  // usual edge-cut math stays valid there. It only breaks down for genuinely
+  // rotated tiles (diagonal/herringbone), where the bounding box is larger
+  // than the tile itself; skip the calculation only in that case.
+  if (hasRotatedPieces(pieces)) return { bottom: null, left: null, right: null, top: null };
   const minX = Math.min(...pieces.map((piece) => piece.xMm));
   const minY = Math.min(...pieces.map((piece) => piece.yMm));
   const maxX = Math.max(...pieces.map((piece) => piece.xMm + piece.widthMm));
@@ -405,6 +704,15 @@ function calculateEdgeCuts(pieces: LayoutTilePiece[]): LayoutEdgeCuts {
 function getEdgeCut(pieces: LayoutTilePiece[], dimension: 'heightMm' | 'widthMm'): number | null {
   const cuts = pieces.filter((piece) => piece.kind !== 'full').map((piece) => piece[dimension]);
   return cuts.length ? Math.round(Math.min(...cuts)) : null;
+}
+
+function hasRotatedPieces(pieces: LayoutTilePiece[]): boolean {
+  return pieces.some((piece) => {
+    if (!piece.polygon?.length) return false;
+    const boxAreaMm2 = piece.widthMm * piece.heightMm;
+    const polygonAreaMm2 = piece.areaMm2 ?? boxAreaMm2;
+    return boxAreaMm2 > 0 && Math.abs(polygonAreaMm2 - boxAreaMm2) > Math.max(1, boxAreaMm2 * 0.02);
+  });
 }
 
 function getBoundingBox(points: PointMm[]) {

@@ -72,6 +72,30 @@ describe('custom room drawing', () => {
     ]);
   });
 
+  it('keeps a four-point zone at its original position when closing it', () => {
+    const points = [
+      { x: 400, y: 300 },
+      { x: 1400, y: 300 },
+      { x: 1400, y: 1100 },
+      { x: 400, y: 1100 },
+    ];
+
+    expect(buildClosedOrthogonalContour(points, false)).toEqual(points);
+    expect(buildClosedOrthogonalContour([...points, points[0]], false)).toEqual(points);
+  });
+
+  it('keeps a four-point diagonal zone at its original position when closing it', () => {
+    const points = [
+      { x: 500, y: 300 },
+      { x: 1500, y: 450 },
+      { x: 1300, y: 1300 },
+      { x: 350, y: 1000 },
+    ];
+
+    expect(buildClosedContour(points, false)).toEqual(points);
+    expect(buildClosedContour([...points, points[0]], false)).toEqual(points);
+  });
+
   it('rejects a new segment that crosses an existing wall', () => {
     const points = [{ x: 0, y: 0 }, { x: 1000, y: 1000 }, { x: 0, y: 1000 }];
     expect(validateDraftPoint(points, { x: 1000, y: 0 })).toBe('Линии помещения не могут пересекаться.');

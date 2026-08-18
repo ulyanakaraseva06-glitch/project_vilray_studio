@@ -13,6 +13,7 @@ import {
   addRoomObject,
   addWallZone,
   createProjectFromTemplate,
+  clampRoomObjectToContour,
   connectRoomOpenings,
   confirmRoomAreaDimensions,
   deleteOpening,
@@ -21,6 +22,7 @@ import {
   deleteRoomObject,
   deleteZone,
   ensureProjectDefaults,
+  footprintsIntersectPartition,
   getSurfaceMaterial,
   getOpeningConnectionCandidates,
   getZoneMaterial,
@@ -35,6 +37,12 @@ import {
   resetPartition,
   resetRoomObject,
   renameRoomArea,
+  resolveRoomObjectStacking,
+  resolveWallObjectStacking,
+  getRoomObjectWallProjection,
+  rotateRoomObject,
+  getRoomObjectCorners,
+  slideRoomObjectPosition,
   updatePrimaryCustomTileMaterial,
   updatePrimaryTileMaterial,
   updateRoomHeight,
@@ -45,7 +53,9 @@ import {
   updateSurfaceTileMaterial,
   updateZoneLayoutOffset,
   updateZoneLayoutPattern,
+  updateZoneLayoutStagger,
   updateZoneName,
+  updateZonePolygonPoints,
   updateZoneShape,
   updateZoneTileMaterial,
   updateZoneTileColor,
@@ -169,6 +179,14 @@ describe('project factory', () => {
     expect(getSurfaceMaterial(updated, 'surface-wall-1')).toMatchObject({ presetId: '600x1200' });
   });
 
+  it('assigns a tile material to one room floor without changing another room', () => {
+    const project = addRoomFromTemplate(createProjectFromTemplate(templates[0], [1700, 2000]), templates[0], [1200, 1600]);
+    const updated = updateSurfaceTileMaterial(project, 'surface-floor-room-2', { id: '600x600', label: '60x60', widthMm: 600, heightMm: 600 });
+
+    expect(getSurfaceMaterial(updated, 'surface-floor-room-2')).toMatchObject({ presetId: '600x600' });
+    expect(getSurfaceMaterial(updated, 'surface-floor')).toMatchObject({ presetId: '600x1200' });
+  });
+
   it('preserves materials and matching surface assignments after changing room template', () => {
     const rectangle = templates.find((template) => template.id === 'rectangle') ?? templates[0];
     const square = templates.find((template) => template.id === 'square') ?? templates[0];
@@ -208,6 +226,22 @@ describe('project factory', () => {
 
     expect(getZoneMaterial(updated, floor.id, floor.zones[0].id)).toMatchObject({ widthMm: 200, heightMm: 600 });
     expect(updated.surfaces.find((surface) => surface.id === floor.id)?.zones[0].layout.pattern).toBe('diagonal');
+  });
+
+  it('keeps the selected layout when its stagger is changed', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const floor = project.surfaces.find((surface) => surface.id === 'surface-floor')!;
+    const zoneId = floor.zones[0].id;
+    const withHerringbone = updateZoneLayoutPattern(project, floor.id, zoneId, 'herringbone');
+    const withStagger = updateZoneLayoutStagger(withHerringbone, floor.id, zoneId, 'third');
+    const layout = withStagger.surfaces.find((surface) => surface.id === floor.id)!.zones[0].layout;
+
+    expect(layout).toMatchObject({ pattern: 'herringbone', stagger: 'third' });
+    expect(withStagger.room).toBe(withHerringbone.room);
+    expect(withStagger.surfaces.map((surface) => surface.id)).toEqual(withHerringbone.surfaces.map((surface) => surface.id));
+    withHerringbone.surfaces.forEach((surface, index) => {
+      if (surface.id !== floor.id) expect(withStagger.surfaces[index]).toBe(surface);
+    });
   });
 
   it('stores manual layout offset for one surface', () => {
@@ -286,6 +320,28 @@ describe('project factory', () => {
 
     expect(floorResult.zone).toMatchObject({ locked: true, shape: { type: 'polygon', points: [{ x: 100, y: 100 }, { x: 900, y: 100 }, { x: 700, y: 800 }] } });
     expect(wallResult.zone).toMatchObject({ locked: true, shape: { type: 'polygon', points: [{ x: 250, y: 300 }, { x: 1250, y: 300 }, { x: 1250, y: 1700 }, { x: 250, y: 1700 }] } });
+  });
+
+  it('moves a saved manual zone as one piece while keeping it locked', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const result = addManualZone(project, 'surface-floor', [{ x: 100, y: 100 }, { x: 900, y: 100 }, { x: 700, y: 800 }]);
+    const updated = updateZonePolygonPoints(result.project, 'surface-floor', result.zone!.id, [{ x: 250, y: 300 }, { x: 1050, y: 300 }, { x: 850, y: 1000 }]);
+    const moved = updated.surfaces.find((surface) => surface.id === 'surface-floor')!.zones[1]!;
+
+    expect(moved.locked).toBe(true);
+    expect(moved.shape).toEqual({ type: 'polygon', points: [{ x: 250, y: 300 }, { x: 1050, y: 300 }, { x: 850, y: 1000 }] });
+  });
+
+  it('persists a translated locked zone after project normalization', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const result = addManualZone(project, 'surface-floor', [{ x: 100, y: 100 }, { x: 900, y: 100 }, { x: 900, y: 900 }, { x: 100, y: 900 }]);
+    const moved = updateZonePolygonPoints(result.project, 'surface-floor', result.zone!.id, [{ x: 400, y: 500 }, { x: 1200, y: 500 }, { x: 1200, y: 1300 }, { x: 400, y: 1300 }]);
+    const hydrated = ensureProjectDefaults(moved);
+
+    expect(hydrated.surfaces.find((surface) => surface.id === 'surface-floor')!.zones[1]!.shape).toEqual({
+      type: 'polygon',
+      points: [{ x: 400, y: 500 }, { x: 1200, y: 500 }, { x: 1200, y: 1300 }, { x: 400, y: 1300 }],
+    });
   });
 
   it('does not delete base zones but deletes extra zones', () => {
@@ -520,6 +576,25 @@ describe('project factory', () => {
     expect(deleted.surfaces.some((surface) => surface.sourceRef?.startsWith(`partition:${partition.id}`))).toBe(false);
   });
 
+  it('rejects a partition move that crosses a concave room wall', () => {
+    const contour = [
+      { x: 0, y: 0 },
+      { x: 3000, y: 0 },
+      { x: 3000, y: 1000 },
+      { x: 1000, y: 1000 },
+      { x: 1000, y: 3000 },
+      { x: 0, y: 3000 },
+    ];
+    const project = addRoomFromContour(createProjectFromTemplate(templates[0], [1700, 2000]), contour);
+    const room = project.room.areas![1];
+    const box = getBoundingBox(room.contour);
+    const withPartition = addPartition(project, { x: box.minX, y: box.minY + 500 }, { x: box.minX + 900, y: box.minY + 500 }, room.id);
+    const partition = withPartition.room.partitions![0];
+    const rejected = movePartition(withPartition, partition.id, { x: box.minX + 500, y: box.minY + 1500 }, { x: box.minX + 2500, y: box.minY + 1500 });
+
+    expect(rejected.room.partitions![0]).toEqual(partition);
+  });
+
   it('preserves material assignments when a second room is added', () => {
     const project = createProjectFromTemplate(templates[0], [1700, 2000]);
     const assigned = updateSurfaceTileMaterial(project, 'surface-wall-2', { id: '600x600', label: '60Г—60', widthMm: 600, heightMm: 600 });
@@ -552,10 +627,10 @@ describe('project factory', () => {
     expect(deleted.objects).toHaveLength(0);
   });
 
-  it('keeps room objects from overlapping during creation and movement', () => {
+  it('stacks a room object above another when footprints overlap', () => {
     const project = createProjectFromTemplate(templates[0], [1700, 2000]);
-    const first = addRoomObject(project, { areaId: 'room-1', excludeTile: false, heightMm: 850, lengthMm: 800, name: 'Первый', widthMm: 500 });
-    const second = addRoomObject(first.project, { areaId: 'room-1', excludeTile: false, heightMm: 850, lengthMm: 800, name: 'Второй', widthMm: 500 });
+    const first = addRoomObject(project, { areaId: 'room-1', excludeTile: false, heightMm: 850, lengthMm: 800, name: 'Нижний', widthMm: 500 });
+    const second = addRoomObject(first.project, { areaId: 'room-1', excludeTile: false, heightMm: 720, lengthMm: 800, name: 'Верхний', widthMm: 500 });
     const moved = moveRoomObject(second.project, second.object!.id, first.object!.xMm, first.object!.yMm);
     const firstObject = moved.project.objects.find((object) => object.id === first.object!.id)!;
     const secondObject = moved.project.objects.find((object) => object.id === second.object!.id)!;
@@ -564,9 +639,146 @@ describe('project factory', () => {
       && firstObject.yMm < secondObject.yMm + secondObject.widthMm
       && firstObject.yMm + firstObject.widthMm > secondObject.yMm;
 
-    expect(second.error).toBeUndefined();
-    expect(second.object).not.toMatchObject({ xMm: first.object!.xMm, yMm: first.object!.yMm });
-    expect(overlap).toBe(false);
+    expect(moved.error).toBeUndefined();
+    expect(overlap).toBe(true);
+    expect(secondObject.elevationMm).toBe(firstObject.elevationMm + firstObject.heightMm);
+  });
+
+  it('reports a stacking conflict when there is not enough vertical room', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const first = addRoomObject(project, { areaId: 'room-1', excludeTile: false, heightMm: 2000, lengthMm: 800, name: 'Высокий', widthMm: 500 });
+    const second = addRoomObject(first.project, { areaId: 'room-1', excludeTile: false, heightMm: 900, lengthMm: 800, name: 'Второй', widthMm: 500 });
+    const moved = moveRoomObject(second.project, second.object!.id, first.object!.xMm, first.object!.yMm);
+    const stack = resolveRoomObjectStacking(
+      {
+        xMm: first.object!.xMm,
+        yMm: first.object!.yMm,
+        lengthMm: 800,
+        widthMm: 500,
+        heightMm: 900,
+      },
+      project.room.heightMm,
+      [first.object!],
+      0,
+    );
+
+    expect(stack.conflictIds).toEqual([first.object!.id]);
+    expect(moved.error).toContain('недостаточно места');
+    expect(moved.conflictIds).toEqual([first.object!.id]);
+    expect(moved.project.objects.find((object) => object.id === second.object!.id)).toMatchObject({
+      xMm: second.object!.xMm,
+      yMm: second.object!.yMm,
+    });
+  });
+
+  it('moves a room object into another room when it is dropped inside that floor', () => {
+    const firstRoom = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const project = addRoomFromTemplate(firstRoom, templates[0], [1200, 1600]);
+    const added = addRoomObject(project, { areaId: 'room-1', excludeTile: false, heightMm: 850, lengthMm: 800, name: 'Шкаф', widthMm: 500 });
+    const targetArea = added.project.room.areas!.find((area) => area.id === 'room-2')!;
+    const targetBox = getBoundingBox(targetArea.contour);
+    const moved = moveRoomObject(added.project, added.object!.id, targetBox.minX + 100, targetBox.minY + 100, 'room-2');
+
+    expect(moved.error).toBeUndefined();
+    expect(moved.object).toMatchObject({
+      areaId: 'room-2',
+      xMm: targetBox.minX + 100,
+      yMm: targetBox.minY + 100,
+    });
+  });
+
+  it('clamps a dragged object inside the walls of a room it is not in yet', () => {
+    const contour = [{ x: 1000, y: 500 }, { x: 2200, y: 500 }, { x: 2200, y: 2100 }, { x: 1000, y: 2100 }];
+    const object = { lengthMm: 800, widthMm: 500, xMm: 0, yMm: 0 };
+
+    const beyondTopLeft = clampRoomObjectToContour(contour, object, -400, -400);
+    const beyondBottomRight = clampRoomObjectToContour(contour, object, 9000, 9000);
+    const inside = clampRoomObjectToContour(contour, object, 1300, 900);
+
+    expect(beyondTopLeft).toEqual({ x: 1000, y: 500 });
+    expect(beyondBottomRight).toEqual({ x: 2200 - 800, y: 2100 - 500 });
+    expect(inside).toEqual({ x: 1300, y: 900 });
+  });
+
+  it('slides along a wall instead of jumping away when dragged past it', () => {
+    const contour = [{ x: 0, y: 0 }, { x: 2000, y: 0 }, { x: 2000, y: 2000 }, { x: 0, y: 2000 }];
+    const object = { lengthMm: 800, widthMm: 500, xMm: 100, yMm: 100 };
+    const alongLeft = slideRoomObjectPosition(contour, object, -250, 400, { x: 100, y: 100 });
+    const alongTop = slideRoomObjectPosition(contour, object, 300, -180, { x: 100, y: 100 });
+    const corner = slideRoomObjectPosition(contour, object, -100, -100, { x: 100, y: 100 });
+
+    expect(alongLeft).toEqual({ x: 0, y: 400 });
+    expect(alongTop).toEqual({ x: 300, y: 0 });
+    expect(corner).toEqual({ x: 0, y: 0 });
+  });
+
+  it('keeps wall objects from overlapping vertically when their spans overlap', () => {
+    const lower = resolveWallObjectStacking(800, 2700, 100, 600, 400, [
+      { id: 'upper', elevationMm: 1500, heightMm: 700, offsetMm: 200, widthMm: 500 },
+    ]);
+    const conflict = resolveWallObjectStacking(2000, 2700, 100, 600, 0, [
+      { id: 'tall', elevationMm: 0, heightMm: 2000, offsetMm: 100, widthMm: 600 },
+    ]);
+    const freeAbove = resolveWallObjectStacking(700, 2700, 100, 600, 1200, [
+      { id: 'base', elevationMm: 0, heightMm: 850, offsetMm: 100, widthMm: 600 },
+    ]);
+    const snapOutOfOverlap = resolveWallObjectStacking(700, 2700, 100, 600, 400, [
+      { id: 'base', elevationMm: 0, heightMm: 850, offsetMm: 100, widthMm: 600 },
+    ]);
+
+    expect(lower.conflictIds).toEqual([]);
+    expect(lower.elevationMm).toBe(400);
+    expect(conflict.conflictIds).toEqual(['tall']);
+    expect(freeAbove.conflictIds).toEqual([]);
+    expect(freeAbove.elevationMm).toBe(1200);
+    expect(snapOutOfOverlap.conflictIds).toEqual([]);
+    expect(snapOutOfOverlap.elevationMm).toBe(850);
+  });
+
+  it('allows footprint overlap while clamping to walls and stacks later via resolveRoomObjectStacking', () => {
+    const contour = [{ x: 0, y: 0 }, { x: 2000, y: 0 }, { x: 2000, y: 2000 }, { x: 0, y: 2000 }];
+    const object = { lengthMm: 500, widthMm: 500, xMm: 0, yMm: 0 };
+    const occupied = {
+      areaId: 'room-1', excludeFloorTile: false, excludeWallTile: false, elevationMm: 0, heightMm: 800,
+      id: 'blocker', initialElevationMm: 0, initialXmm: 700, initialYmm: 700, lengthMm: 600, name: 'Тумба',
+      rotationDeg: 0, widthMm: 600, xMm: 700, yMm: 700,
+    };
+
+    const placed = clampRoomObjectToContour(contour, object, 750, 750);
+    const stack = resolveRoomObjectStacking(
+      { xMm: placed.x, yMm: placed.y, lengthMm: object.lengthMm, widthMm: object.widthMm, heightMm: 700 },
+      2700,
+      [occupied],
+      0,
+    );
+
+    expect(placed).toEqual({ x: 750, y: 750 });
+    expect(stack.conflictIds).toEqual([]);
+    expect(stack.elevationMm).toBe(800);
+  });
+
+  it('keeps objects off partitions while allowing placement beside them', () => {
+    const contour = [{ x: 0, y: 0 }, { x: 3000, y: 0 }, { x: 3000, y: 2000 }, { x: 0, y: 2000 }];
+    const partition = { start: { x: 1500, y: 200 }, end: { x: 1500, y: 1800 }, thicknessMm: 100 };
+    const onPartition = slideRoomObjectPosition(
+      contour,
+      { lengthMm: 800, widthMm: 500 },
+      1400,
+      700,
+      { x: 200, y: 700 },
+      [partition as never],
+    );
+    const beside = slideRoomObjectPosition(
+      contour,
+      { lengthMm: 800, widthMm: 500 },
+      200,
+      700,
+      { x: 200, y: 700 },
+      [partition as never],
+    );
+
+    expect(footprintsIntersectPartition({ xMm: onPartition.x, yMm: onPartition.y, lengthMm: 800, widthMm: 500 }, partition)).toBe(false);
+    expect(beside).toEqual({ x: 200, y: 700 });
   });
 
   it('rejects invalid object dimensions and renames a room', () => {
@@ -578,5 +790,47 @@ describe('project factory', () => {
     expect(invalid.error).toContain('положительными');
     expect(oversized.error).toContain('не помещается');
     expect(renamed.room.areas![0].name).toBe('Главная ванная');
+  });
+
+  it('rotates an object around its center and keeps corners for angled footprints', () => {
+    const project = createProjectFromTemplate(templates[0], [3000, 3000]);
+    const added = addRoomObject(project, { areaId: 'room-1', excludeTile: false, heightMm: 850, lengthMm: 800, name: 'Тумба', widthMm: 400 });
+    expect(added.object).toBeTruthy();
+    const rotated = rotateRoomObject(added.project, added.object!.id, 45);
+    expect(rotated.error).toBeUndefined();
+    expect(rotated.object?.rotationDeg).toBe(45);
+    const corners = getRoomObjectCorners(rotated.object!);
+    expect(corners).toHaveLength(4);
+    const box = getBoundingBox(corners);
+    expect(box.width).toBeGreaterThan(800);
+    expect(box.height).toBeGreaterThan(400);
+  });
+
+  it('projects a partial object touch onto a wall elevation', () => {
+    const project = ensureProjectDefaults(createProjectFromTemplate(templates[0], [3000, 3000]));
+    const area = project.room.areas![0];
+    const wallSurface = project.surfaces.find((surface) => surface.sourceRef === `wall:${area.id}:1`);
+    expect(wallSurface).toBeTruthy();
+    const object = {
+      areaId: area.id,
+      elevationMm: 0,
+      excludeFloorTile: false,
+      excludeWallTile: false,
+      heightMm: 800,
+      id: 'partial-wall-object',
+      initialElevationMm: 0,
+      initialXmm: 100,
+      initialYmm: 20,
+      lengthMm: 600,
+      name: 'Тумба',
+      rotationDeg: 20,
+      widthMm: 400,
+      xMm: 100,
+      yMm: 20,
+    };
+    const withObject = { ...project, objects: [object] };
+    const projection = getRoomObjectWallProjection(withObject, wallSurface!.id, object);
+    expect(projection).not.toBeNull();
+    expect(projection!.widthMm).toBeGreaterThanOrEqual(1);
   });
 });

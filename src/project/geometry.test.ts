@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { templates } from '../config/appConfig';
-import { createContourFromTemplate, createSurfaces, moveWall, updateSegmentLength, validateContour, validateRoomHeight } from './geometry';
+import { createContourFromTemplate, createSurfaces, isSegmentWithinContour, moveWall, updateSegmentLength, validateContour, validateRoomHeight } from './geometry';
 
 describe('room geometry', () => {
   it('creates a rectangular contour from a template size', () => {
@@ -75,5 +75,27 @@ describe('room geometry', () => {
     expect(updated[1].x).toBe(2000);
     expect(updated[2].x).toBe(2000);
     expect(validateContour(updated).ok).toBe(true);
+  });
+
+  it('rejects a partition segment that crosses a wall of a concave room', () => {
+    const contour = [
+      { x: 0, y: 0 },
+      { x: 3000, y: 0 },
+      { x: 3000, y: 1000 },
+      { x: 1000, y: 1000 },
+      { x: 1000, y: 3000 },
+      { x: 0, y: 3000 },
+    ];
+
+    expect(isSegmentWithinContour(contour, { x: 500, y: 500 }, { x: 2500, y: 500 })).toBe(true);
+    expect(isSegmentWithinContour(contour, { x: 500, y: 1500 }, { x: 2500, y: 1500 })).toBe(false);
+  });
+
+  it('allows a partition to touch a wall only at its endpoint', () => {
+    const contour = createContourFromTemplate(templates[0], [1700, 2000]);
+
+    expect(isSegmentWithinContour(contour, { x: 0, y: 900 }, { x: 800, y: 900 })).toBe(true);
+    expect(isSegmentWithinContour(contour, { x: -100, y: 900 }, { x: 800, y: 900 })).toBe(false);
+    expect(isSegmentWithinContour(contour, { x: 0, y: 0 }, { x: 1700, y: 0 })).toBe(false);
   });
 });

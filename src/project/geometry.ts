@@ -332,7 +332,7 @@ function interiorAngleDeg(previous: PointMm, current: PointMm, next: PointMm): n
   return Math.acos(cosine) * 180 / Math.PI;
 }
 
-function segmentsIntersect(a: PointMm, b: PointMm, c: PointMm, d: PointMm): boolean {
+export function segmentsIntersect(a: PointMm, b: PointMm, c: PointMm, d: PointMm): boolean {
   const cross = (p: PointMm, q: PointMm, r: PointMm) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
   const abC = cross(a, b, c);
   const abD = cross(a, b, d);
@@ -343,6 +343,63 @@ function segmentsIntersect(a: PointMm, b: PointMm, c: PointMm, d: PointMm): bool
   if (cdA === 0 && onSegment(c, d, a)) return true;
   if (cdB === 0 && onSegment(c, d, b)) return true;
   return Math.sign(abC) !== Math.sign(abD) && Math.sign(cdA) !== Math.sign(cdB);
+}
+
+export function isSegmentWithinContour(contour: PointMm[], start: PointMm, end: PointMm): boolean {
+  if (contour.length < 3 || !pointInPolygonOrBoundary(start, contour) || !pointInPolygonOrBoundary(end, contour)) return false;
+  const direction = { x: end.x - start.x, y: end.y - start.y };
+  const directionLengthSq = direction.x * direction.x + direction.y * direction.y;
+  if (!directionLengthSq) return false;
+  const epsilon = 1e-7;
+
+  for (let index = 0; index < contour.length; index += 1) {
+    const wallStart = contour[index];
+    const wallEnd = contour[(index + 1) % contour.length];
+    const wallDirection = { x: wallEnd.x - wallStart.x, y: wallEnd.y - wallStart.y };
+    const offset = { x: wallStart.x - start.x, y: wallStart.y - start.y };
+    const crossDirections = crossVectors(direction, wallDirection);
+    const crossOffsetDirection = crossVectors(offset, direction);
+
+    if (Math.abs(crossDirections) <= epsilon) {
+      if (Math.abs(crossOffsetDirection) > epsilon) continue;
+      const t1 = (offset.x * direction.x + offset.y * direction.y) / directionLengthSq;
+      const wallEndOffset = { x: wallEnd.x - start.x, y: wallEnd.y - start.y };
+      const t2 = (wallEndOffset.x * direction.x + wallEndOffset.y * direction.y) / directionLengthSq;
+      const overlapStart = Math.max(0, Math.min(t1, t2));
+      const overlapEnd = Math.min(1, Math.max(t1, t2));
+      if (overlapEnd - overlapStart > epsilon) return false;
+      if (overlapEnd >= -epsilon && overlapStart <= 1 + epsilon && overlapStart > epsilon && overlapStart < 1 - epsilon) return false;
+      continue;
+    }
+
+    const t = crossVectors(offset, wallDirection) / crossDirections;
+    const u = crossOffsetDirection / crossDirections;
+    if (t >= -epsilon && t <= 1 + epsilon && u >= -epsilon && u <= 1 + epsilon && t > epsilon && t < 1 - epsilon) return false;
+  }
+
+  const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+  return pointInPolygonOrBoundary(midpoint, contour);
+}
+
+function pointInPolygonOrBoundary(point: PointMm, polygon: PointMm[]): boolean {
+  for (let index = 0; index < polygon.length; index += 1) {
+    const start = polygon[index];
+    const end = polygon[(index + 1) % polygon.length];
+    const cross = (point.x - start.x) * (end.y - start.y) - (point.y - start.y) * (end.x - start.x);
+    if (Math.abs(cross) <= 1e-7 && onSegment(start, end, point)) return true;
+  }
+  let inside = false;
+  for (let index = 0, previous = polygon.length - 1; index < polygon.length; previous = index, index += 1) {
+    const currentPoint = polygon[index];
+    const previousPoint = polygon[previous];
+    if ((currentPoint.y > point.y) !== (previousPoint.y > point.y)
+      && point.x < ((previousPoint.x - currentPoint.x) * (point.y - currentPoint.y)) / (previousPoint.y - currentPoint.y) + currentPoint.x) inside = !inside;
+  }
+  return inside;
+}
+
+function crossVectors(first: PointMm, second: PointMm): number {
+  return first.x * second.y - first.y * second.x;
 }
 
 function onSegment(a: PointMm, b: PointMm, point: PointMm): boolean {
@@ -388,6 +445,7 @@ function createBaseZone(surfaceId: string, shape: FinishZone['shape'], materialI
 function createDefaultLayout(settings?: ProjectSettings): LayoutSettings {
   return {
     pattern: 'straight',
+    stagger: 'none',
     rotation: 0,
     angleDeg: 0,
     groutMm: settings?.groutMm ?? 2,

@@ -213,7 +213,14 @@ describe('layout engine', () => {
     expect(result.edgeOffsets.right).toBe(0);
   });
 
-  it('supports third, quarter, wood and diagonal layout patterns', () => {
+  it('supports brick, third, quarter, deck, diagonal and herringbone layout patterns', () => {
+    const brick = generateRectLayout({
+      heightMm: 1200,
+      layout: { ...layout, groutMm: 0, pattern: 'brick' },
+      tileHeightMm: 1200,
+      tileWidthMm: 600,
+      widthMm: 2400,
+    });
     const third = generateRectLayout({
       heightMm: 1200,
       layout: { ...layout, groutMm: 0, pattern: 'third-offset' },
@@ -228,10 +235,17 @@ describe('layout engine', () => {
       tileWidthMm: 600,
       widthMm: 1200,
     });
-    const wood = generateRectLayout({
-      heightMm: 1800,
-      layout: { ...layout, groutMm: 0, pattern: 'wood-random' },
+    const straightWithThirdStagger = generateRectLayout({
+      heightMm: 1200,
+      layout: { ...layout, groutMm: 0, pattern: 'straight', stagger: 'third' },
       tileHeightMm: 600,
+      tileWidthMm: 600,
+      widthMm: 1200,
+    });
+    const deck = generateRectLayout({
+      heightMm: 2400,
+      layout: { ...layout, groutMm: 0, pattern: 'wood-random' },
+      tileHeightMm: 1200,
       tileWidthMm: 600,
       widthMm: 1200,
     });
@@ -242,11 +256,26 @@ describe('layout engine', () => {
       tileWidthMm: 600,
       widthMm: 1200,
     });
+    const herringbone = generateRectLayout({
+      heightMm: 1800,
+      layout: { ...layout, groutMm: 0, pattern: 'herringbone' },
+      tileHeightMm: 200,
+      tileWidthMm: 600,
+      widthMm: 1800,
+    });
 
+    expect(brick.pieces.some((piece) => piece.row === 0 && piece.widthMm === 1200 && piece.heightMm === 600)).toBe(true);
+    expect(brick.pieces.some((piece) => piece.row === 1 && piece.widthMm === 600 && piece.heightMm === 600)).toBe(true);
     expect(third.pieces.some((piece) => piece.row === 1 && piece.widthMm === 200)).toBe(true);
     expect(quarter.pieces.some((piece) => piece.row === 1 && piece.widthMm === 150)).toBe(true);
-    expect(wood.pieces.some((piece) => piece.row === 1 && piece.widthMm > 190 && piece.widthMm < 210)).toBe(true);
+    expect(straightWithThirdStagger.pieces.some((piece) => piece.row === 1 && piece.widthMm === 200)).toBe(true);
+    expect(deck.pieces.some((piece) => piece.col === 0 && piece.widthMm === 600 && piece.heightMm === 1200)).toBe(true);
+    expect(deck.pieces.some((piece) => piece.col === 1 && piece.yMm === 0 && piece.heightMm !== 1200)).toBe(true);
+    expect(diagonal.pieces.some((piece) => piece.polygon?.some((point, index, points) => point.x !== points[(index + 1) % points.length].x && point.y !== points[(index + 1) % points.length].y))).toBe(true);
     expect(diagonal.cutCount + diagonal.criticalCount).toBeGreaterThan(0);
+    expect(herringbone.pieces.some((piece) => piece.id.includes('-horizontal'))).toBe(true);
+    expect(herringbone.pieces.some((piece) => piece.id.includes('-vertical'))).toBe(true);
+    expect(herringbone.fullCount).toBeGreaterThan(0);
   });
 
   it('clips pieces around blocked rectangles such as doors', () => {
@@ -262,5 +291,17 @@ describe('layout engine', () => {
 
     expect(area).toBeLessThan(2000 * 2700);
     expect(result.pieces.every((piece) => !(piece.xMm > 600 && piece.xMm < 1400 && piece.yMm > 600 && piece.yMm < 2700))).toBe(true);
+  });
+
+  it('reuses an unchanged layout result from the bounded cache', () => {
+    const input = {
+      heightMm: 2700,
+      layout,
+      tileHeightMm: 600,
+      tileWidthMm: 600,
+      widthMm: 2000,
+    };
+
+    expect(generateRectLayout(input)).toBe(generateRectLayout({ ...input, layout: { ...layout } }));
   });
 });

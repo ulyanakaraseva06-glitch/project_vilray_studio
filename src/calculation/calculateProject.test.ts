@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { templates } from '../config/appConfig';
 import { addFloorZone, addOpening, addPartition, addRoomObject, addWallZone, createProjectFromTemplate, updateZoneTileMaterial } from '../project/projectFactory';
-import { calculateProject } from './calculateProject';
+import { calculateProject, tilesNeededFromArea } from './calculateProject';
 
 describe('calculateProject', () => {
+  it('packs cut pieces into whole tiles by area and rounds up', () => {
+    expect(tilesNeededFromArea(600 * 600, 600, 600)).toBe(1);
+    expect(tilesNeededFromArea(600 * 600 * 1.2, 600, 600)).toBe(2);
+    expect(tilesNeededFromArea(0, 600, 600)).toBe(0);
+  });
+
   it('groups pieces by material and includes floor zones', () => {
     const project = createProjectFromTemplate(templates[0], [1700, 2000]);
     const zoned = addFloorZone(project, 'rect');
@@ -14,7 +20,8 @@ describe('calculateProject', () => {
 
     expect(result.zones.length).toBeGreaterThan(updated.surfaces.length);
     expect(result.materials.some((item) => item.material.presetId === '600x600')).toBe(true);
-    expect(result.totalPurchasePieces).toBeGreaterThan(result.fullPieces);
+    expect(result.totalPurchasePieces).toBeGreaterThan(0);
+    expect(result.roomCount).toBe(1);
     expect(result.totalAreaM2).toBeGreaterThan(0);
     expect(result.totalAreaM2).toBeCloseTo(calculateProject(project).totalAreaM2, 1);
   });

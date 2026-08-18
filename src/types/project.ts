@@ -35,10 +35,12 @@ export interface PolygonZone {
   points: PointMm[];
 }
 
-export type LayoutPattern = 'straight' | 'half-offset' | 'third-offset' | 'quarter-offset' | 'wood-random' | 'diagonal';
+export type LayoutPattern = 'straight' | 'brick' | 'half-offset' | 'third-offset' | 'quarter-offset' | 'wood-random' | 'diagonal' | 'herringbone';
+export type LayoutStagger = 'none' | 'half' | 'third' | 'quarter';
 
 export interface LayoutSettings {
   pattern: LayoutPattern;
+  stagger?: LayoutStagger;
   rotation: 0 | 90;
   angleDeg?: 0 | 45;
   groutMm: number;
@@ -149,6 +151,8 @@ export interface RoomObject {
   lengthMm: number;
   name: string;
   elevationMm: number;
+  /** Plan rotation in degrees (counter-clockwise around footprint center). */
+  rotationDeg: number;
   widthMm: number;
   xMm: number;
   yMm: number;
