@@ -87,16 +87,24 @@ export function validateDraftPoint(points: PointMm[], nextPoint: PointMm): strin
   if (!previous) return null;
   if (distance(previous, nextPoint) < CUSTOM_DRAW_MIN_SIDE_MM) return `Стена должна быть не короче ${CUSTOM_DRAW_MIN_SIDE_MM} мм.`;
   const closesContour = points.length >= CUSTOM_DRAW_MIN_POINTS && samePoint(points[0], nextPoint);
-  if (closesContour) {
-    for (let index = 1; index < points.length - 2; index += 1) {
-      if (segmentsIntersect(points[index], points[index + 1], previous, nextPoint)) return 'Линии помещения не могут пересекаться.';
+  // Validate self-intersections between the new segment (previous -> nextPoint)
+  // and all already existing segments.
+  // Intersections at the shared endpoint are ignored; everything else is rejected.
+  const intersectsExistingSegment = () => {
+    for (let index = 0; index < points.length - 1; index += 1) {
+      if (segmentsIntersectIgnoringSharedEndpoint(points[index], points[index + 1], previous, nextPoint)) return true;
     }
+    return false;
+  };
+
+  if (closesContour) {
+    if (intersectsExistingSegment()) return 'Линии помещения не могут пересекаться.';
     return null;
   }
   if (points.some((point) => samePoint(point, nextPoint))) return 'Точки помещения не должны совпадать.';
 
-  for (let index = 0; index < points.length - 2; index += 1) {
-    if (segmentsIntersect(points[index], points[index + 1], previous, nextPoint)) return 'Линии помещения не могут пересекаться.';
+  for (let index = 0; index < points.length - 1; index += 1) {
+    if (segmentsIntersectIgnoringSharedEndpoint(points[index], points[index + 1], previous, nextPoint)) return 'Линии помещения не могут пересекаться.';
   }
   return null;
 }
@@ -108,8 +116,8 @@ export function buildClosedContour(points: PointMm[], normalize = true): PointMm
   const last = openPoints[openPoints.length - 1];
   if (!last) return null;
   if (distance(last, first) < CUSTOM_DRAW_MIN_SIDE_MM) return null;
-  for (let index = 1; index < openPoints.length - 2; index += 1) {
-    if (segmentsIntersect(openPoints[index], openPoints[index + 1], last, first)) return null;
+  for (let index = 0; index < openPoints.length - 1; index += 1) {
+    if (segmentsIntersectIgnoringSharedEndpoint(openPoints[index], openPoints[index + 1], last, first)) return null;
   }
   return normalize ? normalizeDraftContour(openPoints) : openPoints;
 }
@@ -148,6 +156,44 @@ function segmentsIntersect(a: PointMm, b: PointMm, c: PointMm, d: PointMm): bool
 
 function onSegment(a: PointMm, b: PointMm, point: PointMm): boolean {
   return point.x >= Math.min(a.x, b.x) && point.x <= Math.max(a.x, b.x) && point.y >= Math.min(a.y, b.y) && point.y <= Math.max(a.y, b.y);
+}
+
+function pointOnSegmentStrict(a: PointMm, b: PointMm, point: PointMm): boolean {
+  if (!onSegment(a, b, point)) return false;
+  if (samePoint(a, point)) return false;
+  if (samePoint(b, point)) return false;
+  return true;
+}
+
+function segmentsProperlyIntersect(a: PointMm, b: PointMm, c: PointMm, d: PointMm): boolean {
+  const cross = (p: PointMm, q: PointMm, r: PointMm) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const abC = cross(a, b, c);
+  const abD = cross(a, b, d);
+  const cdA = cross(c, d, a);
+  const cdB = cross(c, d, b);
+  // Proper crossing happens only when all orientations are non-zero
+  // (i.e. they intersect in the segment interiors, not only at endpoints).
+  if (abC === 0 || abD === 0 || cdA === 0 || cdB === 0) return false;
+  return Math.sign(abC) !== Math.sign(abD) && Math.sign(cdA) !== Math.sign(cdB);
+}
+
+function segmentsIntersectIgnoringSharedEndpoint(a: PointMm, b: PointMm, c: PointMm, d: PointMm): boolean {
+  if (!segmentsIntersect(a, b, c, d)) return false;
+  // If they cross in the interior, it is always invalid.
+  if (segmentsProperlyIntersect(a, b, c, d)) return true;
+
+  // If any endpoint of one segment lies strictly inside the other segment,
+  // it means one wall "enters" another — invalid.
+  if (
+    pointOnSegmentStrict(c, d, a)
+    || pointOnSegmentStrict(c, d, b)
+    || pointOnSegmentStrict(a, b, c)
+    || pointOnSegmentStrict(a, b, d)
+  ) return true;
+
+  // Otherwise, intersection can only be at shared endpoints.
+  const sharesEndpoint = samePoint(a, c) || samePoint(a, d) || samePoint(b, c) || samePoint(b, d);
+  return !sharesEndpoint;
 }
 
 function normalizeDraftContour(points: PointMm[]): PointMm[] {

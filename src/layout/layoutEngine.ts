@@ -81,6 +81,11 @@ function generateRectLayoutUncached(input: RectLayoutInput): RectLayoutResult {
     return summarizePieces(pieces, false);
   }
 
+  const turnDeg = normalizeTurnDeg(input.layout.turnDeg);
+  if (turnDeg !== 0) {
+    return generateTurnedLayout(input, tile, origin, maxPieces, turnDeg);
+  }
+
   if (input.layout.pattern === 'diagonal' || input.layout.pattern === 'herringbone') {
     return generateAngledLayout(input, tile, origin, maxPieces);
   }
@@ -142,10 +147,15 @@ function generateDeckLayout(
   const pieces: LayoutTilePiece[] = [];
   let truncated = false;
 
-  for (let tileX = startX; tileX < surfaceWidth; tileX += stepX) {
-    const columnIndex = Math.round((tileX - origin.xMm) / stepX);
+  // IMPORTANT:
+  // For deck/stagger we need consistent "neighbor column" alternation.
+  // Using absolute indices derived from `origin.xMm` can shift parity when `origin`
+  // isn't aligned to the grout/tile grid. Use a relative 0..N index from the first
+  // generated column instead.
+  let columnIndex = 0;
+  for (let tileX = startX; tileX < surfaceWidth; tileX += stepX, columnIndex += 1) {
     const columnOffset = input.layout.stagger && input.layout.stagger !== 'none'
-      ? getExplicitStaggerOffset(input.layout.stagger, columnIndex, stepY)
+      ? getDeckExplicitStaggerOffset(input.layout.stagger, columnIndex, tile.heightMm)
       : getDeckColumnOffset(columnIndex, stepY);
     const startY = normalizeStart(origin.yMm + columnOffset, stepY);
     let row = 0;
@@ -169,6 +179,85 @@ function generateDeckLayout(
         });
       }
 
+      if (pieces.length >= maxPieces) {
+        truncated = true;
+        return summarizePieces(pieces, truncated);
+      }
+    }
+  }
+
+  return summarizePieces(pieces, truncated);
+}
+
+function normalizeTurnDeg(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 0;
+  const wrapped = (((value as number) % 360) + 360) % 360;
+  const rounded = Math.round(wrapped * 10) / 10;
+  return rounded === 0 || rounded === 360 ? 0 : rounded;
+}
+
+function rotatePointAround(point: PointMm, centerX: number, centerY: number, angleRad: number): PointMm {
+  const dx = point.x - centerX;
+  const dy = point.y - centerY;
+  const cosine = Math.cos(angleRad);
+  const sine = Math.sin(angleRad);
+  return {
+    x: centerX + dx * cosine - dy * sine,
+    y: centerY + dx * sine + dy * cosine,
+  };
+}
+
+function generateTurnedLayout(
+  input: RectLayoutInput,
+  tile: { heightMm: number; widthMm: number },
+  origin: { xMm: number; yMm: number },
+  maxPieces: number,
+  turnDeg: number,
+): RectLayoutResult {
+  const pad = Math.ceil(Math.hypot(input.widthMm, input.heightMm) / 2) + Math.max(tile.widthMm, tile.heightMm);
+  const inner = generateRectLayout({
+    heightMm: input.heightMm + pad * 2,
+    layout: {
+      ...input.layout,
+      originMode: 'manual',
+      originXmm: origin.xMm + pad,
+      originYmm: origin.yMm + pad,
+      turnDeg: 0,
+    },
+    maxPieces: Math.max(maxPieces * 3, DEFAULT_MAX_PIECES),
+    tileHeightMm: input.tileHeightMm,
+    tileWidthMm: input.tileWidthMm,
+    widthMm: input.widthMm + pad * 2,
+  });
+  const angle = (turnDeg * Math.PI) / 180;
+  const centerX = input.widthMm / 2;
+  const centerY = input.heightMm / 2;
+  const pieces: LayoutTilePiece[] = [];
+  const fullAreaMm2 = tile.widthMm * tile.heightMm;
+  let truncated = inner.truncated;
+
+  for (const piece of inner.pieces) {
+    const source = (piece.polygon?.length ? piece.polygon : rectToPolygon(piece)).map((point) => ({
+      x: point.x - pad,
+      y: point.y - pad,
+    }));
+    const rotated = source.map((point) => rotatePointAround(point, centerX, centerY, angle));
+    const visibleParts = clipTileToAvailableArea(rotated, input.widthMm, input.heightMm, input.blockedRects ?? []);
+    for (const [partIndex, part] of visibleParts.entries()) {
+      const box = getBoundingBox(part);
+      const areaMm2 = polygonArea(part);
+      pieces.push({
+        areaMm2,
+        col: piece.col,
+        heightMm: box.height,
+        id: `${piece.id}${visibleParts.length > 1 ? `-p${partIndex}` : ''}`,
+        kind: classifyPolygonPiece(areaMm2, box.width, box.height, fullAreaMm2, input.layout.criticalCutMm),
+        polygon: part,
+        row: piece.row,
+        widthMm: box.width,
+        xMm: box.minX,
+        yMm: box.minY,
+      });
       if (pieces.length >= maxPieces) {
         truncated = true;
         return summarizePieces(pieces, truncated);
@@ -217,6 +306,9 @@ function generateAngledLayout(
   if (input.layout.pattern === 'herringbone') {
     const longSide = Math.max(tile.widthMm, tile.heightMm);
     const shortSide = Math.min(tile.widthMm, tile.heightMm);
+    const grout = Math.max(0, input.layout.groutMm);
+    const inset = Math.max(0, Math.min(grout / 2, longSide / 2 - 0.5, shortSide / 2 - 0.5));
+    const staggerPhase = getHerringbonePhaseOffset(input.layout.stagger, longSide);
     const angle = Math.PI / 4;
     const cosine = Math.cos(angle);
     const sine = Math.sin(angle);
@@ -244,25 +336,30 @@ function generateAngledLayout(
 
     for (let row = firstRow; row <= lastRow && !truncated; row += 1) {
       const y = row * shortSide;
-      const rowStart = -row * shortSide;
+      const rowStart = -row * shortSide + staggerPhase;
       const firstPair = Math.floor((localMinX - rowStart) / (2 * longSide)) - 1;
       const lastPair = Math.ceil((localMaxX - rowStart) / (2 * longSide)) + 1;
 
       for (let pair = firstPair; pair <= lastPair && !truncated; pair += 1) {
         const x = rowStart + pair * 2 * longSide;
+
+        // Horizontal tile (longSide x shortSide)
         const horizontal = [
-          { x, y },
-          { x: x + longSide, y },
-          { x: x + longSide, y: y + shortSide },
-          { x, y: y + shortSide },
+          { x: x + inset, y: y + inset },
+          { x: x + longSide - inset, y: y + inset },
+          { x: x + longSide - inset, y: y + shortSide - inset },
+          { x: x + inset, y: y + shortSide - inset },
         ].map(rotatePoint);
+
+        // Vertical tile (shortSide x longSide)
         const verticalX = x + longSide;
         const vertical = [
-          { x: verticalX, y },
-          { x: verticalX + shortSide, y },
-          { x: verticalX + shortSide, y: y + longSide },
-          { x: verticalX, y: y + longSide },
+          { x: verticalX + inset, y: y + inset },
+          { x: verticalX + shortSide - inset, y: y + inset },
+          { x: verticalX + shortSide - inset, y: y + longSide - inset },
+          { x: verticalX + inset, y: y + longSide - inset },
         ].map(rotatePoint);
+
         if (!appendTile(horizontal, row, pair * 2, `h-r${row}-p${pair}-horizontal`)) break;
         if (!appendTile(vertical, row, pair * 2 + 1, `h-r${row}-p${pair}-vertical`)) break;
       }
@@ -536,9 +633,20 @@ function getPatternRowOffset(pattern: LayoutSettings['pattern'], stagger: Layout
 }
 
 function getExplicitStaggerOffset(stagger: LayoutSettings['stagger'], row: number, step: number): number {
-  if (stagger === 'half') return row % 2 === 1 ? step / 2 : 0;
-  if (stagger === 'third') return (row % 3) * (step / 3);
-  if (stagger === 'quarter') return (row % 4) * (step / 4);
+  if (stagger === 'half') return positiveModulo(row, 2) === 1 ? step / 2 : 0;
+  if (stagger === 'third') return positiveModulo(row, 3) * (step / 3);
+  if (stagger === 'quarter') return positiveModulo(row, 4) * (step / 4);
+  return 0;
+}
+
+function positiveModulo(value: number, divisor: number): number {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+function getHerringbonePhaseOffset(stagger: LayoutSettings['stagger'], longSide: number): number {
+  if (stagger === 'half') return longSide / 2;
+  if (stagger === 'third') return longSide / 3;
+  if (stagger === 'quarter') return longSide / 4;
   return 0;
 }
 
@@ -546,6 +654,17 @@ function getDeckColumnOffset(column: number, stepY: number): number {
   const offsets = [0, 0.22, 0.52, 0.76, 0.36, 0.9];
   const index = ((column % offsets.length) + offsets.length) % offsets.length;
   return offsets[index] * stepY;
+}
+
+/**
+ * Deck stagger uses fractions of the actual tile size (not tile+grout step).
+ * This matches the expectation that "1/2" means "half a tile", not "half of stepY".
+ */
+function getDeckExplicitStaggerOffset(stagger: LayoutSettings['stagger'], column: number, tileHeightMm: number): number {
+  if (stagger === 'half') return column % 2 === 1 ? tileHeightMm / 2 : 0;
+  if (stagger === 'third') return (column % 3) * (tileHeightMm / 3);
+  if (stagger === 'quarter') return (column % 4) * (tileHeightMm / 4);
+  return 0;
 }
 
 function resolveOrigin(layout: LayoutSettings, surfaceWidthMm: number, surfaceHeightMm: number, tileWidthMm: number, tileHeightMm: number, stepX: number, stepY: number) {
@@ -682,37 +801,29 @@ function calculateEdgeOffsets(edgeCuts: LayoutEdgeCuts): LayoutEdgeOffsets {
 
 function calculateEdgeCuts(pieces: LayoutTilePiece[]): LayoutEdgeCuts {
   if (!pieces.length) return { bottom: null, left: null, right: null, top: null };
-  // Floor zones (and any zone clipped to a non-rectangular contour) always
-  // produce polygon pieces even for a plain straight/brick pattern — the
-  // piece's xMm/yMm/widthMm/heightMm still describe its bounding box, so the
-  // usual edge-cut math stays valid there. It only breaks down for genuinely
-  // rotated tiles (diagonal/herringbone), where the bounding box is larger
-  // than the tile itself; skip the calculation only in that case.
-  if (hasRotatedPieces(pieces)) return { bottom: null, left: null, right: null, top: null };
   const minX = Math.min(...pieces.map((piece) => piece.xMm));
   const minY = Math.min(...pieces.map((piece) => piece.yMm));
   const maxX = Math.max(...pieces.map((piece) => piece.xMm + piece.widthMm));
   const maxY = Math.max(...pieces.map((piece) => piece.yMm + piece.heightMm));
   return {
-    bottom: getEdgeCut(pieces.filter((piece) => Math.abs(piece.yMm + piece.heightMm - maxY) <= EPSILON_MM), 'heightMm'),
-    left: getEdgeCut(pieces.filter((piece) => Math.abs(piece.xMm - minX) <= EPSILON_MM), 'widthMm'),
-    right: getEdgeCut(pieces.filter((piece) => Math.abs(piece.xMm + piece.widthMm - maxX) <= EPSILON_MM), 'widthMm'),
-    top: getEdgeCut(pieces.filter((piece) => Math.abs(piece.yMm - minY) <= EPSILON_MM), 'heightMm'),
+    bottom: getEdgeCut(pieces.filter((piece) => Math.abs(piece.yMm + piece.heightMm - maxY) <= EPSILON_MM), 'bottom'),
+    left: getEdgeCut(pieces.filter((piece) => Math.abs(piece.xMm - minX) <= EPSILON_MM), 'left'),
+    right: getEdgeCut(pieces.filter((piece) => Math.abs(piece.xMm + piece.widthMm - maxX) <= EPSILON_MM), 'right'),
+    top: getEdgeCut(pieces.filter((piece) => Math.abs(piece.yMm - minY) <= EPSILON_MM), 'top'),
   };
 }
 
-function getEdgeCut(pieces: LayoutTilePiece[], dimension: 'heightMm' | 'widthMm'): number | null {
-  const cuts = pieces.filter((piece) => piece.kind !== 'full').map((piece) => piece[dimension]);
+function getEdgeCut(pieces: LayoutTilePiece[], edge: 'top' | 'right' | 'bottom' | 'left'): number | null {
+  const cuts = pieces
+    .filter((piece) => piece.kind !== 'full')
+    .map((piece) => getPieceEdgeThickness(piece, edge));
   return cuts.length ? Math.round(Math.min(...cuts)) : null;
 }
 
-function hasRotatedPieces(pieces: LayoutTilePiece[]): boolean {
-  return pieces.some((piece) => {
-    if (!piece.polygon?.length) return false;
-    const boxAreaMm2 = piece.widthMm * piece.heightMm;
-    const polygonAreaMm2 = piece.areaMm2 ?? boxAreaMm2;
-    return boxAreaMm2 > 0 && Math.abs(polygonAreaMm2 - boxAreaMm2) > Math.max(1, boxAreaMm2 * 0.02);
-  });
+function getPieceEdgeThickness(piece: LayoutTilePiece, edge: 'top' | 'right' | 'bottom' | 'left'): number {
+  if (!piece.polygon?.length) return edge === 'top' || edge === 'bottom' ? piece.heightMm : piece.widthMm;
+  const box = getBoundingBox(piece.polygon);
+  return edge === 'top' || edge === 'bottom' ? box.height : box.width;
 }
 
 function getBoundingBox(points: PointMm[]) {

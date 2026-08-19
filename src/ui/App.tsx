@@ -31,6 +31,7 @@ import {
   createProjectFromTemplate,
   connectRoomOpenings,
   confirmRoomAreaDimensions,
+  constrainOpeningPosition,
   deleteOpening,
   deletePartition,
   deleteRoomArea,
@@ -73,12 +74,13 @@ import {
   updateZoneLayoutOrigin,
   updateZoneLayoutPattern,
   updateZoneLayoutStagger,
+  updateZoneLayoutGrout,
+  updateZoneLayoutTurn,
   updateZoneName,
   updateZonePolygonPoints,
   updateZoneShape,
   updateZoneTileMaterial,
   updateZoneTileColor,
-  renameTileMaterialsByColor,
   type ZonePresetKind,
   type OpeningConnectionCandidate,
 } from '../project/projectFactory';
@@ -146,9 +148,13 @@ type CanvasLayers = {
 type DrawingMode = 'idle' | 'custom-room' | 'custom-room-review';
 type CustomDrawingMode = 'orthogonal' | 'free';
 type PanelTab = 'tile' | 'room' | 'objects' | 'zones';
-type TilePanelSection = 'format' | 'laying' | 'offset' | 'origin' | 'movement';
+type TilePanelSection = 'grout' | 'laying' | 'offset';
 type CustomDrawingTarget = 'primary' | 'additional';
 type MeasurementMode = 'room' | 'tile' | 'objects';
+
+const ROOM_OBJECT_FILL = '#6F4F93';
+const ROOM_OBJECT_STROKE = '#563779';
+const ROOM_OBJECT_OPACITY = 0.9;
 
 type ConfirmAction =
   | { type: 'reset' }
@@ -221,11 +227,11 @@ function loadStoredTilePalette(): { extended: string[]; palette: TilePaletteEntr
     const parsed = JSON.parse(raw) as { extended?: string[]; palette?: TilePaletteEntry[] };
     const palette = Array.isArray(parsed.palette)
       ? parsed.palette
-        .filter((item) => item && typeof item.color === 'string' && typeof item.name === 'string')
+        .filter((item) => item && typeof item.color === 'string')
         .map((item, index) => ({
           id: typeof item.id === 'string' ? item.id : `palette-${index}`,
           color: normalizeHexColor(item.color),
-          name: item.name.trim().slice(0, 60) || `Цвет ${index + 1}`,
+          name: typeof item.name === 'string' && item.name.trim() ? item.name.trim().slice(0, 60) : `Цвет ${index + 1}`,
         }))
       : defaultTilePalette.map((item) => ({ ...item }));
     const extended = Array.isArray(parsed.extended)
@@ -278,6 +284,7 @@ export function App() {
   const [activePanelTab, setActivePanelTab] = useState<PanelTab>('room');
   const [sidePanelCollapsed, setSidePanelCollapsed] = useState(false);
   const [layoutDragEnabled, setLayoutDragEnabled] = useState(false);
+  const [layoutRotateEnabled, setLayoutRotateEnabled] = useState(false);
   const [calculationOpen, setCalculationOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<EditTarget>(null);
@@ -390,7 +397,28 @@ export function App() {
     setProject(next);
   }
 
+  function resetInteractiveModes() {
+    setManualZoneSurfaceId(null);
+    setManualZonePoints([]);
+    setPartitionDrawingActive(false);
+    setPartitionDraftAreaId(null);
+    setPartitionDraftStart(null);
+    setLayoutDragEnabled(false);
+    setLayoutRotateEnabled(false);
+    setDrawingMode('idle');
+    setDraftContour([]);
+    setDraftWallStart(null);
+    setDrawingToolArmed(true);
+    setDrawingError(null);
+  }
+
+  function switchPanelTab(tab: PanelTab) {
+    resetInteractiveModes();
+    setActivePanelTab(tab);
+  }
+
   function applyTemplate(templateId: string) {
+    resetInteractiveModes();
     if (templateId === selectedTemplateId) return;
     if (hasRoomEdits) {
       setConfirmAction({ type: 'template', templateId });
@@ -421,7 +449,7 @@ export function App() {
     setHasRoomEdits(false);
     setTemplatePickerOpen(false);
     setActivePanelTab('room');
-    const nextProject = createProjectFromTemplate(template, getPreferredTemplateSize(template), project);
+    const nextProject = createProjectFromTemplate(template, getPreferredTemplateSize(template), project, true, false);
     setProject(nextProject);
     setRoomDimensionsAreaId(nextProject.room.areas?.[0]?.id ?? 'room-1');
     setRoomDimensionsError(null);
@@ -429,6 +457,7 @@ export function App() {
   }
 
   function beginCustomDrawing(target: CustomDrawingTarget) {
+    resetInteractiveModes();
     setAdditionalRoomDraft(null);
     setCustomDrawingTarget(target);
     if (target === 'primary') setSelectedTemplateId('custom');
@@ -594,7 +623,7 @@ export function App() {
       selectSurface(`surface-floor-${nextAreaId}`);
       setActivePanelTab('room');
     } else {
-      setProject((current) => updateRoomContour({ ...current, room: { ...current.room, templateId: null } }, draftContour, true));
+      setProject((current) => updateRoomContour({ ...current, room: { ...current.room, templateId: null } }, draftContour, true, false));
       setSelectedTemplateId('custom');
       selectSurface('surface-floor');
       setRoomDimensionsAreaId(null);
@@ -739,12 +768,37 @@ export function App() {
     setProject((current) => updateZoneLayoutStagger(current, activeSurfaceId, activeZoneId, stagger));
   }
 
+  function changeLayoutGrout(groutMm: number) {
+    if (!activeSurfaceId || !activeZoneId) return;
+    setHasRoomEdits(true);
+    setProject((current) => updateZoneLayoutGrout(current, activeSurfaceId, activeZoneId, groutMm));
+  }
+
   function shiftLayoutOrigin(deltaXmm: number, deltaYmm: number) {
     if (!activeSurfaceId || !activeZone) return;
     const layout = activeZone.layout;
     if (!layout) return;
     setHasRoomEdits(true);
     setProject((current) => updateZoneLayoutOffset(current, activeSurfaceId, activeZone.id, layout.originXmm + deltaXmm, layout.originYmm + deltaYmm));
+  }
+
+  function setLayoutTurn(turnDeg: number) {
+    if (!activeSurfaceId || !activeZoneId) return;
+    const wrapped = ((turnDeg % 360) + 360) % 360;
+    const rounded = Math.round(wrapped * 10) / 10;
+    const next = rounded === 0 || rounded === 360 ? 0 : rounded;
+    setHasRoomEdits(true);
+    setProject((current) => {
+      const zone = current.surfaces.find((surface) => surface.id === activeSurfaceId)?.zones.find((item) => item.id === activeZoneId);
+      if ((zone?.layout.turnDeg ?? 0) === next) return current;
+      return updateZoneLayoutTurn(current, activeSurfaceId, activeZoneId, next);
+    });
+  }
+
+  function resetLayoutTurn() {
+    if (!activeSurfaceId || !activeZoneId) return;
+    setHasRoomEdits(true);
+    setProject((current) => updateZoneLayoutTurn(current, activeSurfaceId, activeZoneId, 0));
   }
 
   function setLayoutOriginOffset(axis: 'x' | 'y', value: string) {
@@ -796,7 +850,7 @@ export function App() {
     setRoomDimensionsAreaId(draftAreaId);
     setRoomDimensionsError(null);
     setLayers({ grid: true, floor: true, walls: false, dimensions: true });
-    selectSurface(null);
+    selectSurface('surface-floor');
     setEditTarget(null);
     setViewport(resetViewport());
     setActivePanelTab('room');
@@ -816,7 +870,10 @@ export function App() {
     setHasRoomEdits(true);
     setProject((current) => {
       const added = addOpeningDetailed(current, surfaceId, kind, dimensions);
-      if (!added.opening) return added.project;
+      if (!added.opening) {
+        setRoomActionMessage('На этой стене нет свободного места для нового проёма.');
+        return current;
+      }
       setSelectedSurfaceId(surfaceId);
       setSelectedOpeningId(added.opening.id);
       setSelectedZoneId(null);
@@ -1080,11 +1137,6 @@ export function App() {
     setProject((current) => updateZoneTileColor(current, activeSurfaceId, activeZoneId, color, name));
   }
 
-  function renameTileColor(color: string, name: string) {
-    setHasRoomEdits(true);
-    setProject((current) => renameTileMaterialsByColor(current, color, name));
-  }
-
   function downloadProjectFile() {
     const blob = new Blob([serializeProjectFile(project)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -1117,6 +1169,7 @@ export function App() {
   }
 
   function startManualZone() {
+    resetInteractiveModes();
     const surface = activeSurface;
     if (!surface) return;
     setManualZoneSurfaceId(surface.id);
@@ -1342,8 +1395,17 @@ export function App() {
             onLayersChange={setLayers}
             onAddManualZonePoint={addManualZonePoint}
             layoutDragEnabled={layoutDragEnabled}
+            layoutRotateEnabled={layoutRotateEnabled}
             onLayoutDrag={shiftLayoutOrigin}
-            onToggleLayoutDrag={setLayoutDragEnabled}
+            onLayoutTurn={setLayoutTurn}
+            onToggleLayoutDrag={(enabled) => {
+              setLayoutDragEnabled(enabled);
+              if (enabled) setLayoutRotateEnabled(false);
+            }}
+            onToggleLayoutRotate={(enabled) => {
+              setLayoutRotateEnabled(enabled);
+              if (enabled) setLayoutDragEnabled(false);
+            }}
             onLayoutEdgeOffsetChange={setLayoutEdgeOffset}
             onDeleteOpening={deleteSurfaceOpening}
             onDeletePartition={deleteSurfacePartition}
@@ -1385,10 +1447,6 @@ export function App() {
             onSelectPartition={setSelectedPartitionId}
             selectedZoneId={selectedZoneId}
             selectedWallIndex={selectedWallIndex}
-            activeTileColor={activeTileMaterial?.swatch.type === 'color' ? activeTileMaterial.swatch.value : '#F2EBF9'}
-            canColorTile={Boolean(activeSurfaceId && activeZoneId)}
-            onTileColorChange={applyTileColor}
-            onTileColorRename={renameTileColor}
             showOpeningNames={Boolean(connectionPrompt)}
             viewport={viewport}
           />
@@ -1407,22 +1465,21 @@ export function App() {
             {sidePanelCollapsed ? <ArrowLeft size={16} /> : <ArrowRight size={16} />}
           </button>
           <div className="panel-tabs">
-            <button type="button" className={activePanelTab === 'room' ? 'active' : ''} onClick={() => setActivePanelTab('room')}>Помещение</button>
-            <button type="button" className={activePanelTab === 'tile' ? 'active' : ''} onClick={() => setActivePanelTab('tile')}>Плитка</button>
-            <button type="button" className={activePanelTab === 'zones' ? 'active' : ''} onClick={() => setActivePanelTab('zones')}>Зоны</button>
-            <button type="button" className={activePanelTab === 'objects' ? 'active' : ''} onClick={() => setActivePanelTab('objects')}>Объекты</button>
+            <button type="button" className={activePanelTab === 'room' ? 'active' : ''} onClick={() => switchPanelTab('room')}>Помещение</button>
+            <button type="button" className={activePanelTab === 'tile' ? 'active' : ''} onClick={() => switchPanelTab('tile')}>Плитка</button>
+            <button type="button" className={activePanelTab === 'zones' ? 'active' : ''} onClick={() => switchPanelTab('zones')}>Зоны</button>
+            <button type="button" className={activePanelTab === 'objects' ? 'active' : ''} onClick={() => switchPanelTab('objects')}>Объекты</button>
           </div>
 
           {activePanelTab === 'tile' ? (
-            <div className="panel-stack">
+            <div className="panel-stack tile-panel-stack">
               <section className="panel-module tile-format-module">
                 <h1 className="panel-module-title">Формат плитки</h1>
                 <details
                   className="panel-card panel-section tile-format-select"
-                  open={openTileSection === 'format'}
+                  open
                   onToggle={(event) => {
-                    const open = event.currentTarget.open;
-                    setOpenTileSection((current) => open ? 'format' : current === 'format' ? null : current);
+                    if (!event.currentTarget.open) event.currentTarget.open = true;
                   }}
                 >
                   <summary className={activeTileMaterial ? 'tile-format-summary active' : 'tile-format-summary'}>
@@ -1454,19 +1511,45 @@ export function App() {
                 </details>
               </section>
 
+              <GroutControl
+                groutMm={activeZone?.layout.groutMm ?? project.settings.groutMm}
+                open={openTileSection === 'grout'}
+                disabled={!activeZone}
+                onOpenChange={(open) => setOpenTileSection((current) => (open ? 'grout' : current === 'grout' ? null : current))}
+                onGroutChange={changeLayoutGrout}
+              />
+
+              <section className="panel-module tile-color-module">
+                <h1 className="panel-module-title">Цвет плитки</h1>
+                <div className="panel-card panel-section">
+                  <TileColorPicker
+                    activeColor={activeTileMaterial?.swatch.type === 'color' ? activeTileMaterial.swatch.value : '#F2EBF9'}
+                    canApply={Boolean(activeSurfaceId && activeZoneId)}
+                    project={project}
+                    onSelect={applyTileColor}
+                  />
+                </div>
+              </section>
+
               <LayoutControl
-                layout={activeZone?.layout}
-                layoutDragEnabled={layoutDragEnabled}
+                layoutRotateEnabled={layoutRotateEnabled}
                 material={activeTileMaterial}
                 openSection={openTileSection}
                 onOpenSectionChange={setOpenTileSection}
                 onOriginModeChange={changeOriginMode}
-                onOffsetInput={setLayoutOriginOffset}
                 onOffsetReset={resetLayoutOffset}
                 onOffsetStep={shiftLayoutOrigin}
                 onPatternChange={changeLayoutPattern}
                 onStaggerChange={changeLayoutStagger}
-                onToggleLayoutDrag={setLayoutDragEnabled}
+                onToggleLayoutDrag={(enabled) => {
+                  setLayoutDragEnabled(enabled);
+                  if (enabled) setLayoutRotateEnabled(false);
+                }}
+                onToggleLayoutRotate={(enabled) => {
+                  setLayoutRotateEnabled(enabled);
+                  if (enabled) setLayoutDragEnabled(false);
+                }}
+                onTurnReset={resetLayoutTurn}
                 surface={activeSurface}
                 zone={activeZone}
               />
@@ -1736,21 +1819,20 @@ function HelpDialog({ onClose }: { onClose: () => void }) {
       title: 'Вкладка «Плитка»',
       steps: [
         'Сначала кликните по полу, стене или зоне на схеме — без выбора поверхности настройки не применятся.',
-        'Откройте «Формат плитки» и выберите готовый размер или «Другой размер» (ввод в сантиметрах).',
-        'В «Вариантах укладки» выберите рисунок раскладки (прямая, со смещением и т.д.).',
-        'Задайте точку старта сетки и смещение раскладки полями или перетаскиванием при включённом режиме движения.',
-        'Цвет плитки выбирается кнопкой «Цвет плитки» слева внизу схемы.',
+        'Формат плитки всегда открыт: выберите готовый размер или «Другой размер» (ввод в сантиметрах).',
+        'В «Размере швов» задайте 0 / 0.5 / 1 / 2 / 3 мм или свой вариант — плитки раздвигаются на эту ширину, расчёт стены это учитывает.',
+        'В «Укладке» на фиолетовой строке виден выбранный рисунок. Ниже — точка старта сетки.',
+        'В «Смещении» выберите долю сдвига ряда, затем двигайте раскладку стрелками или кнопкой «Крутить».',
+        'Цвет плитки выбирается пятью кнопками; шестая кнопка «Свой цвет» открывает дополнительные оттенки.',
       ],
     },
     {
       title: 'Цвет плитки',
       steps: [
         'Выберите пол, стену или зону.',
-        'Откройте «Цвет плитки» — список раскрывается вверх.',
-        'В карточках уже есть пастельные цвета: оранжевый, жёлтый, зелёный, голубой, розовый.',
-        'Клик по карточке красит выбранную поверхность. Цвет и название запоминаются в проекте.',
-        '✎ переименовывает цвет (удобно для фирмы или коллекции). × убирает цвет из списка обратно в «Свой цвет».',
-        '«Свой цвет» открывает дополнительные оттенки. Неиспользованный слот в списке заменяется; если все цвета уже применялись — список увеличивается.',
+        'Откройте вкладку «Плитка» — цвета находятся в блоке окрашивания.',
+        'Пять кнопок — готовые пастельные оттенки. Клик красит выбранную поверхность.',
+        '«Свой цвет» открывает дополнительные оттенки. Неиспользованный слот заменяется; если все пять цветов уже применялись, выбранный оттенок просто красится на поверхность.',
       ],
     },
     {
@@ -2222,6 +2304,7 @@ interface WorkspaceCanvasProps {
   partitionDraftStart: PointMm | null;
   onAddPartitionDraftPoint: (point: PointMm) => void;
   layoutDragEnabled: boolean;
+  layoutRotateEnabled: boolean;
   onAddDraftPoint: (point: PointMm) => void;
   onChangeHeight: (areaId: string, value: string) => void;
   onCancelDrawing: () => void;
@@ -2231,7 +2314,9 @@ interface WorkspaceCanvasProps {
   onLayersChange: (layers: CanvasLayers) => void;
   onAddManualZonePoint: (point: PointMm) => void;
   onLayoutDrag: (deltaXmm: number, deltaYmm: number) => void;
+  onLayoutTurn: (turnDeg: number) => void;
   onToggleLayoutDrag: (enabled: boolean) => void;
+  onToggleLayoutRotate: (enabled: boolean) => void;
   onLayoutEdgeOffsetChange: (surfaceId: string, zoneId: string, edge: keyof LayoutEdgeCuts, value: number) => void;
   onDeleteObject: (objectId: string) => void;
   onEditObject: (objectId: string) => void;
@@ -2265,10 +2350,6 @@ interface WorkspaceCanvasProps {
   onViewportChange: (viewport: CanvasViewport) => void;
   onZoneShapeChange: (surfaceId: string, zoneId: string, patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   onZonePolygonChange: (surfaceId: string, zoneId: string, points: PointMm[]) => void;
-  activeTileColor: string;
-  canColorTile: boolean;
-  onTileColorChange: (color: string, name?: string) => void;
-  onTileColorRename: (color: string, name: string) => void;
   showOpeningNames: boolean;
   project: TileProject;
   relatedZoneWallIds: string[];
@@ -2306,6 +2387,7 @@ function WorkspaceCanvas({
   partitionDraftStart,
   onAddPartitionDraftPoint,
   layoutDragEnabled,
+  layoutRotateEnabled,
   onAddDraftPoint,
   onChangeHeight,
   onCancelDrawing,
@@ -2315,7 +2397,9 @@ function WorkspaceCanvas({
   onLayersChange,
   onAddManualZonePoint,
   onLayoutDrag,
+  onLayoutTurn,
   onToggleLayoutDrag,
+  onToggleLayoutRotate,
   onLayoutEdgeOffsetChange,
   onDeleteObject,
   onEditObject,
@@ -2349,10 +2433,6 @@ function WorkspaceCanvas({
   onViewportChange,
   onZoneShapeChange,
   onZonePolygonChange,
-  activeTileColor,
-  canColorTile,
-  onTileColorChange,
-  onTileColorRename,
   showOpeningNames,
   project,
   relatedZoneWallIds,
@@ -2377,6 +2457,20 @@ function WorkspaceCanvas({
     const delta = layoutDragPendingRef.current;
     layoutDragPendingRef.current = { x: 0, y: 0 };
     if (delta.x || delta.y) onLayoutDrag(delta.x, delta.y);
+  });
+  const layoutRotateRef = useRef<{
+    active: boolean;
+    moved: boolean;
+    centerX: number;
+    centerY: number;
+    startAngleDeg: number;
+    startTurnDeg: number;
+  }>({ active: false, moved: false, centerX: 0, centerY: 0, startAngleDeg: 0, startTurnDeg: 0 });
+  const layoutRotatePendingRef = useRef<number | null>(null);
+  const [scheduleLayoutRotate, flushLayoutRotate] = useAnimationFrameCallback<undefined>(() => {
+    const nextTurn = layoutRotatePendingRef.current;
+    layoutRotatePendingRef.current = null;
+    if (nextTurn !== null) onLayoutTurn(nextTurn);
   });
   const planView = useMemo(() => getPlanView(project.room.contour), [project.room.contour]);
   const wallGeometrySignature = [
@@ -2445,6 +2539,16 @@ function WorkspaceCanvas({
     };
   }, [manualZoneSurfaceId, planView, project, size.height, size.width, viewport, wallFrames]);
 
+  const draftDrawingControlStyle = useMemo(() => {
+    if (drawingMode !== 'custom-room' && drawingMode !== 'custom-room-review') return undefined;
+    return {
+      right: 12,
+      top: 12,
+      left: 'auto',
+      width: 208,
+    };
+  }, [drawingMode]);
+
   useEffect(() => {
     const holder = holderRef.current;
     if (!holder) return;
@@ -2472,6 +2576,33 @@ function WorkspaceCanvas({
     // plan instead of nudging the tile pattern. Whether this turns out to be
     // a drag (adjust the origin) or a plain click (exit the mode) is decided
     // in movePan/stopPan once we know if the pointer actually moved.
+    if (layoutRotateEnabled && selectedSurfaceId) {
+      const pointer = event.target.getStage()?.getPointerPosition();
+      if (!pointer) return;
+      const center = getLayoutRotationCenter({
+        planView,
+        project,
+        selectedSurfaceId,
+        selectedZoneId,
+        viewport,
+        wallFrames,
+      });
+      if (center) {
+        const surface = project.surfaces.find((item) => item.id === selectedSurfaceId);
+        const zone = selectedZoneId
+          ? surface?.zones.find((item) => item.id === selectedZoneId)
+          : surface?.zones[0];
+        layoutRotateRef.current = {
+          active: true,
+          moved: false,
+          centerX: center.x,
+          centerY: center.y,
+          startAngleDeg: Math.atan2(pointer.y - center.y, pointer.x - center.x) * (180 / Math.PI),
+          startTurnDeg: zone?.layout.turnDeg ?? 0,
+        };
+        return;
+      }
+    }
     if (layoutDragEnabled && selectedSurfaceId) {
       const pointer = event.target.getStage()?.getPointerPosition();
       if (!pointer) return;
@@ -2569,6 +2700,21 @@ function WorkspaceCanvas({
       setDraftPointer(partitionDraftStart ? constrainPartitionEnd(partitionDraftStart, rawPoint) : rawPoint);
       return;
     }
+    if (layoutRotateRef.current.active) {
+      const pointer = event.target.getStage()?.getPointerPosition();
+      if (!pointer) return;
+      const session = layoutRotateRef.current;
+      const dx = pointer.x - session.centerX;
+      const dy = pointer.y - session.centerY;
+      const moved = session.moved || Math.hypot(dx, dy) > 8;
+      const currentAngleDeg = Math.atan2(dy, dx) * (180 / Math.PI);
+      layoutRotateRef.current = { ...session, moved };
+      if (moved && Math.hypot(dx, dy) >= 8) {
+        layoutRotatePendingRef.current = session.startTurnDeg + currentAngleDeg - session.startAngleDeg;
+        scheduleLayoutRotate(undefined);
+      }
+      return;
+    }
     if (layoutDragRef.current.active) {
       const pointer = event.target.getStage()?.getPointerPosition();
       if (!pointer) return;
@@ -2599,6 +2745,9 @@ function WorkspaceCanvas({
     // A plain click (mousedown+mouseup with no real movement) while "Двигать
     // мышью" is armed means the user clicked elsewhere on the plan rather
     // than dragging the pattern — exit the mode instead of leaving it stuck on.
+    if (layoutRotateRef.current.active && !layoutRotateRef.current.moved) onToggleLayoutRotate(false);
+    layoutRotateRef.current.active = false;
+    if (layoutRotatePendingRef.current !== null) flushLayoutRotate(undefined);
     if (layoutDragRef.current.active && !layoutDragRef.current.moved) onToggleLayoutDrag(false);
     layoutDragRef.current.active = false;
     if (layoutDragPendingRef.current.x || layoutDragPendingRef.current.y) {
@@ -2631,7 +2780,11 @@ function WorkspaceCanvas({
     ? 'canvas-card zone-drawing-active'
     : (drawingMode === 'custom-room' && draftWallStart) || (partitionDrawingActive && partitionDraftStart)
       ? 'canvas-card drawing-line-active'
-      : 'canvas-card';
+      : layoutRotateEnabled
+        ? 'canvas-card layout-rotate-active'
+        : layoutDragEnabled
+          ? 'canvas-card layout-drag-active'
+          : 'canvas-card';
 
   return (
     <div className={canvasClassName} ref={holderRef}>
@@ -2657,8 +2810,8 @@ function WorkspaceCanvas({
         <Layer>
           <Rect name="pan-bg" x={0} y={0} width={size.width} height={size.height} fill="#FBFBFC" />
           <Group x={viewport.x} y={viewport.y} scaleX={viewport.zoom} scaleY={viewport.zoom} listening={false}>
-            {drawingMode === 'idle' && layers.floor ? <Rect {...sectionBlocks.floor} fill="rgba(143, 104, 178, 0.07)" stroke="rgba(96, 65, 126, 0.6)" strokeWidth={1.5} cornerRadius={12} /> : null}
-            {drawingMode === 'idle' && layers.walls && !dimensionEntryAreaId ? <Rect {...sectionBlocks.walls} fill="rgba(143, 104, 178, 0.07)" stroke="rgba(96, 65, 126, 0.6)" strokeWidth={1.5} cornerRadius={12} /> : null}
+            {drawingMode === 'idle' && layers.floor ? <Rect {...sectionBlocks.floor} fillEnabled={false} stroke="rgba(96, 65, 126, 0.6)" strokeWidth={1.5} cornerRadius={12} /> : null}
+            {drawingMode === 'idle' && layers.walls && !dimensionEntryAreaId ? <Rect {...sectionBlocks.walls} fillEnabled={false} stroke="rgba(96, 65, 126, 0.6)" strokeWidth={1.5} cornerRadius={12} /> : null}
           </Group>
           {layers.grid ? <Grid width={size.width} height={size.height} viewport={viewport} /> : null}
           <Group x={viewport.x} y={viewport.y} scaleX={viewport.zoom} scaleY={viewport.zoom}>
@@ -2692,7 +2845,7 @@ function WorkspaceCanvas({
                 onZoneShapeChange={onZoneShapeChange}
                 onZonePolygonChange={onZonePolygonChange}
                 project={project}
-                roomMoveEnabled={activePanelTab !== 'zones' && activePanelTab !== 'objects' && !selectedObjectId && !dimensionEntryAreaId && !partitionDrawingActive && !selectedZoneId && !manualZoneSurfaceId && !layoutDragEnabled}
+                roomMoveEnabled={activePanelTab !== 'zones' && activePanelTab !== 'objects' && !selectedObjectId && !dimensionEntryAreaId && !partitionDrawingActive && !selectedZoneId && !manualZoneSurfaceId && !layoutDragEnabled && !layoutRotateEnabled}
                 selectedSurfaceId={selectedSurfaceId}
                 selectedOpeningId={selectedOpeningId}
                 selectedObjectId={selectedObjectId}
@@ -2810,14 +2963,6 @@ function WorkspaceCanvas({
         <div className="partition-drawing-hint">Кликните у стены, чтобы<br />начать перегородку</div>
       ) : null}
 
-      <TileColorPicker
-        activeColor={activeTileColor}
-        canApply={canColorTile}
-        project={project}
-        onRename={onTileColorRename}
-        onSelect={onTileColorChange}
-      />
-
       {dimensionEntryAreaId && drawingMode === 'idle' ? (
         <div className="room-dimension-controls" style={dimensionControlStyle}>
           <div><strong>Сохранить форму</strong><span>Проверьте размеры стен. После сохранения форму изменить нельзя.</span>{dimensionEntryError ? <em>{dimensionEntryError}</em> : null}</div>
@@ -2826,32 +2971,30 @@ function WorkspaceCanvas({
       ) : null}
 
       {drawingMode === 'custom-room' ? (
-        <div className="drawing-controls">
-          <div className="drawing-mode-options" role="group" aria-label="Инструмент рисования стен">
-            <button type="button" className={drawingToolArmed && customDrawingMode === 'orthogonal' ? 'active' : ''} onClick={() => onCustomDrawingModeChange('orthogonal')}>Нарисовать стену</button>
-            <button type="button" className={drawingToolArmed && customDrawingMode === 'free' ? 'active' : ''} onClick={() => onCustomDrawingModeChange('free')}>Стена под углом</button>
-          </div>
-          <button type="button" className={canCompleteDrawing ? 'drawing-complete ready' : 'drawing-complete'} onClick={onCompleteDrawing} disabled={!canCompleteDrawing}>
+        <div className="manual-zone-controls canvas-manual-zone-controls drawing-room-controls" style={draftDrawingControlStyle}>
+          <span>{!drawingToolArmed && draftContour.length ? 'Режим перемещения: двигайте весь чертёж мышью' : draftContour.length ? `Стройте контур отдельными точками · ${draftContour.length} точ.` : 'Кликните, чтобы поставить начало стены'}</span>
+          <button type="button" className={drawingToolArmed && customDrawingMode === 'orthogonal' ? 'active' : ''} onClick={() => onCustomDrawingModeChange('orthogonal')}>Нарисовать стену</button>
+          <button type="button" className={drawingToolArmed && customDrawingMode === 'free' ? 'active' : ''} onClick={() => onCustomDrawingModeChange('free')}>Стена под углом</button>
+          <button type="button" className={canCompleteDrawing ? 'zone-finish ready' : 'zone-finish'} onClick={onCompleteDrawing} disabled={!canCompleteDrawing}>
             Завершить построение
           </button>
-          <button type="button" onClick={onUndoDraftPoint} disabled={draftContour.length === 0 && !draftWallStart}>
+          <button type="button" className="secondary" onClick={onUndoDraftPoint} disabled={draftContour.length === 0 && !draftWallStart}>
             Отменить действие
           </button>
-          <button type="button" onClick={onCancelDrawing}>
+          <button type="button" className="zone-cancel" onClick={onCancelDrawing}>
             Сброс всего
           </button>
-          <span>{!drawingToolArmed && draftContour.length ? 'Режим перемещения: двигайте весь чертёж мышью' : draftContour.length ? `${draftContour.length} точ.` : 'Кликните, чтобы поставить начало стены'}</span>
           {drawingError ? <em>{drawingError}</em> : null}
         </div>
       ) : null}
 
       {drawingMode === 'custom-room-review' ? (
-        <div className="drawing-controls drawing-review-controls">
-          <strong>Проверить помещение</strong>
+        <div className="manual-zone-controls canvas-manual-zone-controls drawing-room-controls drawing-review-controls" style={draftDrawingControlStyle}>
+          <span>Проверьте помещение перед сохранением.</span>
           <span>У прямоугольной формы тяните стены, у формы с углами — отдельные точки</span>
           {drawingError ? <em>{drawingError}</em> : null}
-          <button type="button" className="drawing-complete" onClick={onSaveDrawing}>Сохранить</button>
-          <button type="button" onClick={onCancelDrawing}>Отмена</button>
+          <button type="button" className="zone-finish ready" onClick={onSaveDrawing}>Сохранить</button>
+          <button type="button" className="zone-cancel" onClick={onCancelDrawing}>Отмена</button>
         </div>
       ) : null}
 
@@ -3197,26 +3340,35 @@ function DraftLengthLabel({ error = false, text, x, y }: { error?: boolean; text
   );
 }
 
+function getVisibleTilePalette(palette: TilePaletteEntry[]): TilePaletteEntry[] {
+  const items = palette.slice(0, 5);
+  if (items.length >= 5) return items;
+  const used = new Set(items.map((item) => normalizeHexColor(item.color)));
+  for (const fallback of defaultTilePalette) {
+    if (items.length >= 5) break;
+    if (used.has(normalizeHexColor(fallback.color))) continue;
+    items.push({ ...fallback });
+    used.add(normalizeHexColor(fallback.color));
+  }
+  return items;
+}
+
 function TileColorPicker({
   activeColor,
   canApply,
-  onRename,
   onSelect,
   project,
 }: {
   activeColor: string;
   canApply: boolean;
-  onRename: (color: string, name: string) => void;
   onSelect: (color: string, name?: string) => void;
   project: TileProject;
 }) {
-  const [open, setOpen] = useState(false);
   const [customOpen, setCustomOpen] = useState(false);
   const [stored, setStored] = useState(loadStoredTilePalette);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [draftName, setDraftName] = useState('');
   const usedColors = useMemo(() => getUsedTileColors(project), [project]);
   const activeNormalized = normalizeHexColor(activeColor);
+  const slots = getVisibleTilePalette(stored.palette);
 
   function commitPalette(nextPalette: TilePaletteEntry[], nextExtended: string[]) {
     setStored({ palette: nextPalette, extended: nextExtended });
@@ -3228,61 +3380,38 @@ function TileColorPicker({
     onSelect(entry.color, entry.name);
   }
 
-  function startRename(entry: TilePaletteEntry) {
-    setEditingId(entry.id);
-    setDraftName(entry.name);
-  }
-
-  function saveRename(entry: TilePaletteEntry) {
-    const nextName = draftName.trim().slice(0, 60) || entry.name;
-    commitPalette(
-      stored.palette.map((item) => (item.id === entry.id ? { ...item, name: nextName } : item)),
-      stored.extended,
-    );
-    onRename(entry.color, nextName);
-    setEditingId(null);
-    setDraftName('');
-  }
-
-  function deleteColor(entry: TilePaletteEntry) {
-    const color = normalizeHexColor(entry.color);
-    const nextPalette = stored.palette.filter((item) => item.id !== entry.id);
-    const nextExtended = stored.extended.includes(color) ? stored.extended : [...stored.extended, color];
-    commitPalette(nextPalette, nextExtended);
-    if (editingId === entry.id) {
-      setEditingId(null);
-      setDraftName('');
-    }
-  }
-
   function addCustomColor(color: string) {
     const normalized = normalizeHexColor(color);
     if (!/^#[0-9A-F]{6}$/.test(normalized)) return;
-    if (stored.palette.some((item) => normalizeHexColor(item.color) === normalized)) {
-      const existing = stored.palette.find((item) => normalizeHexColor(item.color) === normalized)!;
+    const existing = slots.find((item) => normalizeHexColor(item.color) === normalized);
+    if (existing) {
       applyColor(existing);
       setCustomOpen(false);
       return;
     }
 
-    const usedNames = new Set(stored.palette.map((item) => item.name));
+    const usedNames = new Set(slots.map((item) => item.name));
     const entry: TilePaletteEntry = {
       id: `custom-${Date.now()}`,
       color: normalized,
       name: suggestCustomColorName(normalized, usedNames),
     };
 
-    const unusedIndex = stored.palette.findIndex((item) => !usedColors.has(normalizeHexColor(item.color)));
+    const unusedIndex = slots.findIndex((item) => !usedColors.has(normalizeHexColor(item.color)));
     let nextPalette: TilePaletteEntry[];
     let nextExtended = stored.extended.filter((item) => item !== normalized);
 
     if (unusedIndex >= 0) {
-      const replaced = stored.palette[unusedIndex];
-      nextPalette = stored.palette.map((item, index) => (index === unusedIndex ? entry : item));
+      const replaced = slots[unusedIndex];
+      nextPalette = slots.map((item, index) => (index === unusedIndex ? entry : item));
       const replacedColor = normalizeHexColor(replaced.color);
       if (!nextExtended.includes(replacedColor) && replacedColor !== normalized) nextExtended = [...nextExtended, replacedColor];
+    } else if (slots.length < 5) {
+      nextPalette = [...slots, entry];
     } else {
-      nextPalette = [...stored.palette, entry];
+      applyColor(entry);
+      setCustomOpen(false);
+      return;
     }
 
     commitPalette(nextPalette, nextExtended);
@@ -3291,92 +3420,23 @@ function TileColorPicker({
   }
 
   return (
-    <details
-      className="tile-color-picker"
-      open={open}
-      onToggle={(event) => {
-        const nextOpen = event.currentTarget.open;
-        setOpen(nextOpen);
-        if (!nextOpen) {
-          setCustomOpen(false);
-          setEditingId(null);
-        }
-      }}
-    >
-      <summary>
-        <span className="tile-color-chip" style={{ background: activeColor }} />
-        Цвет плитки
-      </summary>
-      <div className="tile-color-popover">
-        <div className="tile-color-card-list">
-          {stored.palette.map((entry) => {
-            const selected = activeNormalized === normalizeHexColor(entry.color);
-            const renaming = editingId === entry.id;
-            return (
-              <article key={entry.id} className={selected ? 'tile-color-card active' : 'tile-color-card'}>
-                <button
-                  type="button"
-                  className="tile-color-card-main"
-                  disabled={!canApply}
-                  onClick={() => applyColor(entry)}
-                >
-                  <span className="tile-color-chip" style={{ background: entry.color }} />
-                  {renaming ? (
-                    <input
-                      className="tile-color-card-input"
-                      maxLength={60}
-                      value={draftName}
-                      autoFocus
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) => setDraftName(event.currentTarget.value)}
-                      onKeyDown={(event) => {
-                        event.stopPropagation();
-                        if (event.key === 'Enter') {
-                          event.preventDefault();
-                          saveRename(entry);
-                        }
-                        if (event.key === 'Escape') {
-                          event.preventDefault();
-                          setEditingId(null);
-                        }
-                      }}
-                      onBlur={() => saveRename(entry)}
-                    />
-                  ) : (
-                    <em>{entry.name}</em>
-                  )}
-                </button>
-                <div className="tile-color-card-actions">
-                  <button
-                    type="button"
-                    aria-label={`Изменить название ${entry.name}`}
-                    title="Изменить название"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      if (renaming) saveRename(entry);
-                      else startRename(entry);
-                    }}
-                  >
-                    ✎
-                  </button>
-                  <button
-                    type="button"
-                    className="danger-lite"
-                    aria-label={`Удалить ${entry.name}`}
-                    title="Удалить цвет"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      deleteColor(entry);
-                    }}
-                  >
-                    ×
-                  </button>
-                </div>
-              </article>
-            );
-          })}
-        </div>
-
+    <div className="tile-color-picker">
+      <div className="tile-color-swatch-row" role="group" aria-label="Цвет плитки">
+        {slots.map((entry) => {
+          const selected = activeNormalized === normalizeHexColor(entry.color);
+          return (
+            <button
+              key={entry.id}
+              type="button"
+              className={selected ? 'tile-color-swatch active' : 'tile-color-swatch'}
+              disabled={!canApply}
+              style={{ background: entry.color }}
+              aria-label="Цвет плитки"
+              aria-pressed={selected}
+              onClick={() => applyColor(entry)}
+            />
+          );
+        })}
         <button
           type="button"
           className={customOpen ? 'tile-color-custom-toggle active' : 'tile-color-custom-toggle'}
@@ -3385,26 +3445,26 @@ function TileColorPicker({
         >
           Свой цвет
         </button>
-
-        {customOpen ? (
-          <div className="extended-pastel-palette" role="listbox" aria-label="Свои цвета">
-            {stored.extended.length ? stored.extended.map((color) => (
-              <button
-                key={color}
-                type="button"
-                disabled={!canApply}
-                style={{ background: color }}
-                aria-label={`Добавить цвет ${color}`}
-                title={color}
-                onClick={() => addCustomColor(color)}
-              />
-            )) : <small>Все дополнительные цвета уже в списке</small>}
-          </div>
-        ) : null}
-
-        {!canApply ? <small>Выберите пол, стену или зону, чтобы покрасить плитку</small> : null}
       </div>
-    </details>
+
+      {customOpen ? (
+        <div className="extended-pastel-palette" role="listbox" aria-label="Свои цвета">
+          {stored.extended.length ? stored.extended.map((color) => (
+            <button
+              key={color}
+              type="button"
+              disabled={!canApply}
+              style={{ background: color }}
+              aria-label={`Добавить цвет ${color}`}
+              title={color}
+              onClick={() => addCustomColor(color)}
+            />
+          )) : <small>Все дополнительные цвета уже в списке</small>}
+        </div>
+      ) : null}
+
+      {!canApply ? <small>Выберите пол, стену или зону, чтобы покрасить плитку</small> : null}
+    </div>
   );
 }
 
@@ -3571,6 +3631,7 @@ function FloorLayer({ block, dimensionEntryAreaId, dimensionsVisible, hideOpenin
   const [stackConflictIds, setStackConflictIds] = useState<string[]>([]);
   const [stackHint, setStackHint] = useState<string | null>(null);
   const [objectDragVisual, setObjectDragVisual] = useState<{ id: string; rotationDeg?: number; xMm: number; yMm: number } | null>(null);
+  const [draggingZoneIds, setDraggingZoneIds] = useState<Record<string, true>>({});
   const [scheduleObjectDragVisual, flushObjectDragVisual] = useAnimationFrameCallback(setObjectDragVisual);
   const areas = project.room.areas ?? [{ id: 'room-1', name: 'Помещение 1', contour: project.room.contour, heightMm: project.room.heightMm }];
   const renderData = useMemo(() => {
@@ -3655,7 +3716,7 @@ function FloorLayer({ block, dimensionEntryAreaId, dimensionsVisible, hideOpenin
               if (deltaXmm || deltaYmm) onMoveRoomArea(area.id, deltaXmm, deltaYmm);
             }}
           >
-            <Line points={points} closed fill={surfaceActive ? '#F2EBF9' : '#FFFFFF'} stroke="#A385C4" strokeWidth={surfaceActive ? 6 : 4} onClick={() => onSelectSurface(floorId)} onTap={() => onSelectSurface(floorId)} />
+            <Line points={points} closed fill="#FFFFFF" stroke="#A385C4" strokeWidth={surfaceActive ? 5 : 3} onClick={() => onSelectSurface(floorId)} onTap={() => onSelectSurface(floorId)} />
             <FloorTileLayout
               blockedObjects={blockedFloorObjects}
               contour={renderContour}
@@ -3666,35 +3727,72 @@ function FloorLayer({ block, dimensionEntryAreaId, dimensionsVisible, hideOpenin
               opacity={layoutOpacity}
               view={view}
             />
-            <Line points={points} closed stroke={surfaceActive ? '#8A6AAE' : '#A385C4'} strokeWidth={surfaceActive ? 6 : 4} listening={false} />
-            {floor.zones.slice(1).map((zone) => {
-              const zoneMaterial = zone.materialId ? renderData.materialsById.get(zone.materialId) : null;
-              const zoneActive = selectedZoneId === zone.id;
-              return zoneMaterial ? (
-                <FloorZoneLayer
-                  blockedObjects={blockedFloorObjects}
-                  key={zone.id}
-                  maskPositionFor={maskVisualFor}
-                  material={zoneMaterial}
-                  onEditOffset={(edge) => onEditLayoutOffset({ type: 'layout-offset', edge, surfaceId: floorId, zoneId: zone.id })}
-                  onSelect={() => onSelectZone(floorId, zone.id)}
-                  onPolygonChange={(points) => onZonePolygonChange(floorId, zone.id, points)}
-                  onShapeChange={(patch) => onZoneShapeChange(floorId, zone.id, patch)}
-                  selected={zoneActive}
-                  showEdgeCuts={measurementMode === 'tile'}
-                  surfaceContour={renderContour}
-                  view={view}
-                  zone={zone}
-                  opacity={surfaceActive && !zoneActive ? 0.48 : 1}
-                />
-              ) : null;
-            })}
+            <Group name="floor-zones">
+              {floor.zones.slice(1).map((zone) => {
+                if (draggingZoneIds[zone.id]) return null;
+                if (zone.shape.type === 'polygon') {
+                  return (
+                    <Line
+                      key={`floor-zone-mask-${zone.id}`}
+                      points={zone.shape.points.flatMap((point) => [view.x(point.x), view.y(point.y)])}
+                      closed
+                      fill="#FFFFFF"
+                      listening={false}
+                    />
+                  );
+                }
+                return (
+                  <Rect
+                    key={`floor-zone-mask-${zone.id}`}
+                    x={view.x(renderBounds.minX + zone.shape.xMm)}
+                    y={view.y(renderBounds.minY + zone.shape.yMm)}
+                    width={mmToCanvas(zone.shape.widthMm)}
+                    height={mmToCanvas(zone.shape.heightMm)}
+                    fill="#FFFFFF"
+                    listening={false}
+                  />
+                );
+              })}
+              <Line points={points} closed stroke="#A385C4" strokeWidth={surfaceActive ? 5 : 3} listening={false} />
+              {floor.zones.slice(1).map((zone) => {
+                const zoneMaterial = zone.materialId ? renderData.materialsById.get(zone.materialId) : null;
+                const zoneActive = selectedZoneId === zone.id;
+                return zoneMaterial ? (
+                  <FloorZoneLayer
+                    blockedObjects={blockedFloorObjects}
+                    key={zone.id}
+                    maskPositionFor={maskVisualFor}
+                    material={zoneMaterial}
+                    onEditOffset={(edge) => onEditLayoutOffset({ type: 'layout-offset', edge, surfaceId: floorId, zoneId: zone.id })}
+                    onSelect={() => onSelectZone(floorId, zone.id)}
+                    onPolygonChange={(points) => onZonePolygonChange(floorId, zone.id, points)}
+                    onShapeChange={(patch) => onZoneShapeChange(floorId, zone.id, patch)}
+                    onDragStateChange={(dragging) => {
+                      setDraggingZoneIds((prev) => {
+                        if (dragging) return { ...prev, [zone.id]: true };
+                        if (!prev[zone.id]) return prev;
+                        const next = { ...prev };
+                        delete next[zone.id];
+                        return next;
+                      });
+                    }}
+                    selected={zoneActive}
+                    showEdgeCuts={measurementMode === 'tile'}
+                    showRoomDimensions={dimensionsVisible}
+                    surfaceContour={renderContour}
+                    view={view}
+                    zone={zone}
+                    opacity={surfaceActive && !zoneActive ? 0.48 : 1}
+                  />
+                ) : null;
+              })}
+            </Group>
             {blockedFloorObjects.map((object) => {
               const position = maskVisualFor(object);
               return (
                 <RotatedObjectRect
                   key={`floor-clear-${object.id}`}
-                  fill={surfaceActive ? '#F2EBF9' : '#FFFFFF'}
+                  fill="#FFFFFF"
                   lengthMm={object.lengthMm}
                   listening={false}
                   rotationDeg={position.rotationDeg}
@@ -3769,7 +3867,7 @@ function FloorLayer({ block, dimensionEntryAreaId, dimensionsVisible, hideOpenin
                 view={view}
               />
             )) : null}
-            {measurementMode === 'tile' && selectedSurfaceId === floorId && !selectedZoneId ? (
+            {measurementMode === 'tile' && (selectedSurfaceId === floorId || dimensionEntryAreaId === area.id) && !selectedZoneId ? (
               <FloorEdgeCutLabels
                 contour={renderContour}
                 layout={baseZone.layout}
@@ -4099,8 +4197,8 @@ function FloorRoomObject({ conflictHighlight = false, contour, measurementMode, 
         selected={selected}
         stacked={!dragging && object.elevationMm > 0}
         view={view}
-        xMm={object.xMm}
-        yMm={object.yMm}
+        xMm={dragging ? object.xMm : displayedXmm}
+        yMm={dragging ? object.yMm : displayedYmm}
       />
       {showObjectSize ? (
         <DraftLengthLabel
@@ -4170,10 +4268,10 @@ const FloorRoomObjectBody = memo(function FloorRoomObjectBody({
   const centerY = view.y(yMm + heightMm / 2);
   const boxBottom = view.y(footprint.maxY);
   const boxCenterX = view.x((footprint.minX + footprint.maxX) / 2);
-  const fill = conflictHighlight ? '#FBE3E3' : selected ? '#7A5A97' : stacked ? '#9B7BB8' : '#8A6AAE';
-  const stroke = conflictHighlight ? '#C62828' : selected ? '#4E2F6C' : '#60417E';
+  const fill = conflictHighlight ? '#FBE3E3' : ROOM_OBJECT_FILL;
+  const stroke = conflictHighlight ? '#C62828' : ROOM_OBJECT_STROKE;
   const textFill = conflictHighlight ? '#C62828' : '#FFFFFF';
-  const baseOpacity = conflictHighlight ? 0.92 : selected ? 0.62 : 0.42;
+  const baseOpacity = conflictHighlight ? 0.92 : ROOM_OBJECT_OPACITY;
   const opacity = fadeForTileOffsets ? Math.min(baseOpacity, 0.14) : baseOpacity;
   // Keep the handle anchored above the object center (not the growing AABB),
   // so the ball and ↻ icon stay glued together while dragging.
@@ -4547,23 +4645,33 @@ function FloorPartition({ contour, onDelete, onEditLength, onMove, onSelect, par
   view: PlanViewTransform;
 }) {
   const [rotationPreview, setRotationPreview] = useState<{ end: PointMm; start: PointMm } | null>(null);
+  const [dragPreview, setDragPreview] = useState<{ end: PointMm; start: PointMm } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [isRotating, setIsRotating] = useState(false);
   const partitionGroupRef = useRef<Konva.Group>(null);
   const lastValidDragRef = useRef<PointMm>({ x: 0, y: 0 });
-  const renderPartition = rotationPreview ?? partition;
+  const overlayPartition = dragPreview ?? rotationPreview ?? partition;
+  const renderPartition = isDragging ? partition : (rotationPreview ?? partition);
   const start = { x: view.x(renderPartition.start.x), y: view.y(renderPartition.start.y) };
   const end = { x: view.x(renderPartition.end.x), y: view.y(renderPartition.end.y) };
   const center = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+  const overlayStart = { x: view.x(overlayPartition.start.x), y: view.y(overlayPartition.start.y) };
+  const overlayEnd = { x: view.x(overlayPartition.end.x), y: view.y(overlayPartition.end.y) };
+  const overlayCenter = { x: (overlayStart.x + overlayEnd.x) / 2, y: (overlayStart.y + overlayEnd.y) / 2 };
   const stripeWidth = Math.max(8, partition.thicknessMm * view.scale);
   const lengthCanvas = Math.max(1, Math.hypot(end.x - start.x, end.y - start.y));
   const sideNormal = { x: -(end.y - start.y) / lengthCanvas, y: (end.x - start.x) / lengthCanvas };
   let upperNormal = { x: -(end.y - start.y) / lengthCanvas, y: (end.x - start.x) / lengthCanvas };
   if (upperNormal.y > 0) upperNormal = { x: -upperNormal.x, y: -upperNormal.y };
   const rotationHandle = { x: center.x + upperNormal.x * 48, y: center.y + upperNormal.y * 48 };
-  const dimensionPosition = { x: center.x - upperNormal.x * 25, y: center.y - upperNormal.y * 25 };
-  const horizontalClearance = Math.abs(upperNormal.x) > 0.01 ? 77 / Math.abs(upperNormal.x) : Number.POSITIVE_INFINITY;
-  const verticalClearance = Math.abs(upperNormal.y) > 0.01 ? 32 / Math.abs(upperNormal.y) : Number.POSITIVE_INFINITY;
+  const overlayLengthCanvas = Math.max(1, Math.hypot(overlayEnd.x - overlayStart.x, overlayEnd.y - overlayStart.y));
+  let overlayUpperNormal = { x: -(overlayEnd.y - overlayStart.y) / overlayLengthCanvas, y: (overlayEnd.x - overlayStart.x) / overlayLengthCanvas };
+  if (overlayUpperNormal.y > 0) overlayUpperNormal = { x: -overlayUpperNormal.x, y: -overlayUpperNormal.y };
+  const dimensionPosition = { x: overlayCenter.x - overlayUpperNormal.x * 25, y: overlayCenter.y - overlayUpperNormal.y * 25 };
+  const horizontalClearance = Math.abs(overlayUpperNormal.x) > 0.01 ? 77 / Math.abs(overlayUpperNormal.x) : Number.POSITIVE_INFINITY;
+  const verticalClearance = Math.abs(overlayUpperNormal.y) > 0.01 ? 32 / Math.abs(overlayUpperNormal.y) : Number.POSITIVE_INFINITY;
   const actionDistance = 25 + Math.min(horizontalClearance, verticalClearance);
-  const actionPosition = { x: center.x - upperNormal.x * actionDistance, y: center.y - upperNormal.y * actionDistance };
+  const actionPosition = { x: overlayCenter.x - overlayUpperNormal.x * actionDistance, y: overlayCenter.y - overlayUpperNormal.y * actionDistance };
 
   function getRotatedPartition(pointer: { x: number; y: number }) {
     const normalAngle = Math.atan2(pointer.y - center.y, pointer.x - center.x);
@@ -4577,118 +4685,147 @@ function FloorPartition({ contour, onDelete, onEditLength, onMove, onSelect, par
   }
 
   return (
-    <Group
-      ref={partitionGroupRef}
-      name="floor-partition"
-      draggable
-      dragBoundFunc={(absolutePosition) => {
-        const parent = partitionGroupRef.current?.getParent();
-        if (!parent) return absolutePosition;
-        const parentTransform = parent.getAbsoluteTransform().copy();
-        const localPosition = parentTransform.copy().invert().point(absolutePosition);
-        const requestedDeltaMm = {
-          x: localPosition.x / view.scale,
-          y: localPosition.y / view.scale,
-        };
-        const clampedDeltaMm = clampPartitionDragDelta(
-          contour,
-          partition,
-          partitions,
-          requestedDeltaMm,
-          lastValidDragRef.current,
-        );
-        lastValidDragRef.current = clampedDeltaMm;
-        return parentTransform.point({
-          x: clampedDeltaMm.x * view.scale,
-          y: clampedDeltaMm.y * view.scale,
-        });
-      }}
-      onClick={(event) => { event.cancelBubble = true; onSelect(); }}
-      onTap={(event) => { event.cancelBubble = true; onSelect(); }}
-      onMouseDown={(event) => { event.cancelBubble = true; onSelect(); }}
-      onTouchStart={(event) => { event.cancelBubble = true; onSelect(); }}
-      onDragStart={(event) => { event.cancelBubble = true; lastValidDragRef.current = { x: 0, y: 0 }; onSelect(); }}
-      onDragMove={(event) => {
-        if (event.target !== event.currentTarget) return;
-        event.cancelBubble = true;
-      }}
-      onDragEnd={(event) => {
-        if (event.target !== event.currentTarget) return;
-        event.cancelBubble = true;
-        const node = event.currentTarget;
-        const deltaXmm = Math.round(node.x() / view.scale);
-        const deltaYmm = Math.round(node.y() / view.scale);
-        node.position({ x: 0, y: 0 });
-        if (deltaXmm || deltaYmm) onMove(
-          { x: partition.start.x + deltaXmm, y: partition.start.y + deltaYmm },
-          { x: partition.end.x + deltaXmm, y: partition.end.y + deltaYmm },
-        );
-      }}
-    >
-      {selectedSide ? (() => {
-        const sideDirection = selectedSide === 'a' ? 1 : -1;
-        const edgeOffset = stripeWidth / 2 + 2;
-        const edgeStart = { x: start.x + sideNormal.x * edgeOffset * sideDirection, y: start.y + sideNormal.y * edgeOffset * sideDirection };
-        const edgeEnd = { x: end.x + sideNormal.x * edgeOffset * sideDirection, y: end.y + sideNormal.y * edgeOffset * sideDirection };
-        return (
-          <Group listening={false}>
-            <Line points={[edgeStart.x, edgeStart.y, edgeEnd.x, edgeEnd.y]} stroke="#777777" strokeWidth={12} opacity={0.3} shadowColor="#606060" shadowBlur={18} shadowOpacity={0.9} lineCap="round" />
-            <Line points={[edgeStart.x, edgeStart.y, edgeEnd.x, edgeEnd.y]} stroke="#5E5E5E" strokeWidth={3} shadowColor="#4F4F4F" shadowBlur={20} shadowOpacity={1} lineCap="round" />
-          </Group>
-        );
-      })() : null}
-      <Line points={[start.x, start.y, end.x, end.y]} stroke={selected ? '#563779' : '#6F4F93'} strokeWidth={stripeWidth + (selected ? 4 : 2)} lineCap="butt" />
-      <Line points={[start.x, start.y, end.x, end.y]} stroke={selected ? '#B99FD2' : '#CDB9DF'} strokeWidth={Math.max(4, stripeWidth - 2)} lineCap="butt" />
-      <Line points={[start.x, start.y, end.x, end.y]} stroke="transparent" strokeWidth={24} />
-      <Circle x={center.x} y={center.y} radius={7} fill="#6F4F93" stroke="#FFFFFF" strokeWidth={2} />
-      {selected ? <DimensionLabel x={dimensionPosition.x} y={dimensionPosition.y} text={`${segmentLength(renderPartition.start, renderPartition.end)} мм`} onClick={onEditLength} /> : null}
-      {selected ? <PartitionDistanceLabels contour={contour} end={renderPartition.end} start={renderPartition.start} thicknessMm={partition.thicknessMm} view={view} /> : null}
-      {selected ? (
-        <>
-          <Circle x={start.x} y={start.y} radius={5} fill="#6F4F93" />
-          <Circle x={end.x} y={end.y} radius={5} fill="#6F4F93" />
-          <Line points={[center.x, center.y, rotationHandle.x, rotationHandle.y]} stroke="#8A6AAE" strokeWidth={1.5} dash={[4, 3]} listening={false} />
-          <Circle
-            x={rotationHandle.x}
-            y={rotationHandle.y}
-            radius={12}
-            fill="#FFFFFF"
-            stroke="#6F4F93"
-            strokeWidth={2}
-            draggable
-            onMouseDown={(event) => { event.cancelBubble = true; }}
-            onTouchStart={(event) => { event.cancelBubble = true; }}
-            onDragMove={(event) => {
-              event.cancelBubble = true;
-              const node = event.currentTarget;
-              const rotated = getRotatedPartition({ x: node.x(), y: node.y() });
-              if (isPartitionPlacementValid(contour, rotated.start, rotated.end, partitions, partition.id)) setRotationPreview(rotated);
-            }}
-            onDragEnd={(event) => {
-              event.cancelBubble = true;
-              const node = event.currentTarget;
-              const rotated = getRotatedPartition({ x: node.x(), y: node.y() });
-              node.position(rotationHandle);
-              setRotationPreview(null);
-              if (isPartitionPlacementValid(contour, rotated.start, rotated.end, partitions, partition.id)) onMove(rotated.start, rotated.end);
-            }}
-          />
-          <Text
-            x={rotationHandle.x - 10}
-            y={rotationHandle.y - 10}
-            width={20}
-            height={20}
-            align="center"
-            verticalAlign="middle"
-            text="↻"
-            fill="#6F4F93"
-            fontSize={17}
-            fontStyle="bold"
-            listening={false}
-          />
-        </>
+    <Group>
+      <Group
+        ref={partitionGroupRef}
+        name="floor-partition"
+        draggable={!isRotating}
+        dragBoundFunc={(absolutePosition) => {
+          const parent = partitionGroupRef.current?.getParent();
+          if (!parent) return absolutePosition;
+          const parentTransform = parent.getAbsoluteTransform().copy();
+          const localPosition = parentTransform.copy().invert().point(absolutePosition);
+          const requestedDeltaMm = {
+            x: localPosition.x / view.scale,
+            y: localPosition.y / view.scale,
+          };
+          const clampedDeltaMm = clampPartitionDragDelta(
+            contour,
+            partition,
+            partitions,
+            requestedDeltaMm,
+            lastValidDragRef.current,
+          );
+          lastValidDragRef.current = clampedDeltaMm;
+          return parentTransform.point({
+            x: clampedDeltaMm.x * view.scale,
+            y: clampedDeltaMm.y * view.scale,
+          });
+        }}
+        onClick={(event) => { event.cancelBubble = true; onSelect(); }}
+        onTap={(event) => { event.cancelBubble = true; onSelect(); }}
+        onMouseDown={(event) => { event.cancelBubble = true; onSelect(); }}
+        onTouchStart={(event) => { event.cancelBubble = true; onSelect(); }}
+        onDragStart={(event) => {
+          event.cancelBubble = true;
+          lastValidDragRef.current = { x: 0, y: 0 };
+          setDragPreview(partition);
+          setIsDragging(true);
+          onSelect();
+        }}
+        onDragMove={(event) => {
+          if (event.target !== event.currentTarget) return;
+          event.cancelBubble = true;
+          const node = event.currentTarget;
+          const deltaXmm = Math.round(node.x() / view.scale);
+          const deltaYmm = Math.round(node.y() / view.scale);
+          setDragPreview({
+            start: { x: partition.start.x + deltaXmm, y: partition.start.y + deltaYmm },
+            end: { x: partition.end.x + deltaXmm, y: partition.end.y + deltaYmm },
+          });
+        }}
+        onDragEnd={(event) => {
+          if (event.target !== event.currentTarget) return;
+          event.cancelBubble = true;
+          const node = event.currentTarget;
+          const deltaXmm = Math.round(node.x() / view.scale);
+          const deltaYmm = Math.round(node.y() / view.scale);
+          node.position({ x: 0, y: 0 });
+          setDragPreview(null);
+          setIsDragging(false);
+          if (deltaXmm || deltaYmm) onMove(
+            { x: partition.start.x + deltaXmm, y: partition.start.y + deltaYmm },
+            { x: partition.end.x + deltaXmm, y: partition.end.y + deltaYmm },
+          );
+        }}
+      >
+        {selectedSide ? (() => {
+          const sideDirection = selectedSide === 'a' ? 1 : -1;
+          const edgeOffset = stripeWidth / 2 + 2;
+          const edgeStart = { x: start.x + sideNormal.x * edgeOffset * sideDirection, y: start.y + sideNormal.y * edgeOffset * sideDirection };
+          const edgeEnd = { x: end.x + sideNormal.x * edgeOffset * sideDirection, y: end.y + sideNormal.y * edgeOffset * sideDirection };
+          return (
+            <Group listening={false}>
+              <Line points={[edgeStart.x, edgeStart.y, edgeEnd.x, edgeEnd.y]} stroke="#777777" strokeWidth={12} opacity={0.3} shadowColor="#606060" shadowBlur={18} shadowOpacity={0.9} lineCap="round" />
+              <Line points={[edgeStart.x, edgeStart.y, edgeEnd.x, edgeEnd.y]} stroke="#5E5E5E" strokeWidth={3} shadowColor="#4F4F4F" shadowBlur={20} shadowOpacity={1} lineCap="round" />
+            </Group>
+          );
+        })() : null}
+        <Line points={[start.x, start.y, end.x, end.y]} stroke={selected ? '#563779' : '#6F4F93'} strokeWidth={stripeWidth + (selected ? 4 : 2)} lineCap="butt" />
+        <Line points={[start.x, start.y, end.x, end.y]} stroke={selected ? '#B99FD2' : '#CDB9DF'} strokeWidth={Math.max(4, stripeWidth - 2)} lineCap="butt" />
+        <Line points={[start.x, start.y, end.x, end.y]} stroke="transparent" strokeWidth={24} />
+        <Circle x={center.x} y={center.y} radius={7} fill="#6F4F93" stroke="#FFFFFF" strokeWidth={2} />
+        {selected && !isDragging ? <Circle x={start.x} y={start.y} radius={5} fill="#6F4F93" /> : null}
+        {selected && !isDragging ? <Circle x={end.x} y={end.y} radius={5} fill="#6F4F93" /> : null}
+        {selected && !isDragging ? (
+          <>
+            <Line points={[center.x, center.y, rotationHandle.x, rotationHandle.y]} stroke="#8A6AAE" strokeWidth={1.5} dash={[4, 3]} listening={false} />
+            <Circle
+              x={rotationHandle.x}
+              y={rotationHandle.y}
+              radius={12}
+              fill="#FFFFFF"
+              stroke="#6F4F93"
+              strokeWidth={2}
+              draggable
+              onDragStart={(event) => {
+                event.cancelBubble = true;
+                setIsRotating(true);
+              }}
+              onMouseDown={(event) => { event.cancelBubble = true; }}
+              onTouchStart={(event) => { event.cancelBubble = true; }}
+              onDragMove={(event) => {
+                event.cancelBubble = true;
+                const node = event.currentTarget;
+                const rotated = getRotatedPartition({ x: node.x(), y: node.y() });
+                if (isPartitionPlacementValid(contour, rotated.start, rotated.end, partitions, partition.id)) setRotationPreview(rotated);
+              }}
+              onDragEnd={(event) => {
+                event.cancelBubble = true;
+                const node = event.currentTarget;
+                const rotated = getRotatedPartition({ x: node.x(), y: node.y() });
+                node.position(rotationHandle);
+                setIsRotating(false);
+                setRotationPreview(null);
+                if (isPartitionPlacementValid(contour, rotated.start, rotated.end, partitions, partition.id)) onMove(rotated.start, rotated.end);
+              }}
+            />
+            <Text
+              x={rotationHandle.x - 10}
+              y={rotationHandle.y - 10}
+              width={20}
+              height={20}
+              align="center"
+              verticalAlign="middle"
+              text="↻"
+              fill="#6F4F93"
+              fontSize={17}
+              fontStyle="bold"
+              listening={false}
+            />
+          </>
+        ) : null}
+      </Group>
+
+      {selected && (isDragging || isRotating || rotationPreview !== null) ? (
+        <PartitionDistanceLabels contour={contour} end={overlayPartition.end} start={overlayPartition.start} thicknessMm={partition.thicknessMm} view={view} />
       ) : null}
-      {selected ? (
+
+      {selected && !isDragging && !isRotating && rotationPreview === null ? (
+        <DimensionLabel x={dimensionPosition.x} y={dimensionPosition.y} text={`${segmentLength(overlayPartition.start, overlayPartition.end)} мм`} onClick={onEditLength} />
+      ) : null}
+
+      {selected && !isDragging && !isRotating && rotationPreview === null ? (
         <Group x={actionPosition.x - 14} y={actionPosition.y - 14}>
           <Group onClick={(event) => { event.cancelBubble = true; onDelete(); }} onTap={(event) => { event.cancelBubble = true; onDelete(); }}>
             <Rect width={28} height={28} fill="#FFFFFF" stroke="#E1B7C0" cornerRadius={6} shadowColor="rgba(38, 24, 50, 0.16)" shadowBlur={6} />
@@ -4943,6 +5080,7 @@ function WallsLayer({
                   openings={surface.openings}
                   selected={selectedZoneId === zone.id}
                   showEdgeCuts={tileOffsetsVisible}
+                  showRoomDimensions={dimensionsVisible}
                   zone={zone}
                 />
               );
@@ -5003,8 +5141,8 @@ function WallsLayer({
               y={frame.y}
               width={frame.width}
               height={frame.height}
-              stroke={active ? '#7B43AF' : relatedToZone ? '#A066D1' : '#D0D0D8'}
-              strokeWidth={active ? 5 : relatedToZone ? 3 : 1}
+              stroke={active ? '#A385C4' : relatedToZone ? '#C4B0D6' : '#D0D0D8'}
+              strokeWidth={active ? 4 : relatedToZone ? 2.5 : 1}
               listening={false}
             />
             <Text
@@ -5063,6 +5201,7 @@ function WallsLayer({
             key={`selected-opening-overlay-${opening.id}`}
             frame={frame}
             opening={opening}
+            siblingOpenings={(surface?.openings ?? []).filter((item) => item.id !== opening.id)}
             onDelete={() => onDeleteOpening(opening.id)}
             onMove={(xMm, yMm) => onMoveOpening(opening.id, xMm, yMm)}
             onResize={(patch) => onResizeOpening(opening.id, patch)}
@@ -5139,8 +5278,8 @@ function WallRoomObject({ conflictHighlight = false, frame, object, onDelete, on
     return settled;
   }
 
-  const fill = conflictHighlight ? '#FBE3E3' : selected ? '#765594' : '#8A6AAE';
-  const stroke = conflictHighlight ? '#C62828' : '#60417E';
+  const fill = conflictHighlight ? '#FBE3E3' : ROOM_OBJECT_FILL;
+  const stroke = conflictHighlight ? '#C62828' : ROOM_OBJECT_STROKE;
   const textFill = conflictHighlight ? '#C62828' : '#FFFFFF';
 
   return (
@@ -5166,7 +5305,7 @@ function WallRoomObject({ conflictHighlight = false, frame, object, onDelete, on
         onMove(position.offsetMm, position.elevationMm);
       }}
     >
-      <Rect width={width} height={height} fill={fill} opacity={conflictHighlight ? 0.92 : selected ? 0.72 : 0.48} stroke={stroke} strokeWidth={selected || conflictHighlight ? 3 : 2} cornerRadius={6} />
+      <Rect width={width} height={height} fill={fill} opacity={conflictHighlight ? 0.92 : ROOM_OBJECT_OPACITY} stroke={stroke} strokeWidth={selected || conflictHighlight ? 3 : 2} cornerRadius={6} />
       <Text x={4} y={Math.max(4, height / 2 - 7)} width={Math.max(20, width - 8)} align="center" text={object.name} fill={textFill} fontSize={11} listening={false} />
       {selected && !conflictHighlight ? <DraftLengthLabel x={width / 2} y={-18} text={`${projection.widthMm} × ${object.heightMm} мм`} /> : null}
       {selected && !conflictHighlight ? (
@@ -5267,6 +5406,7 @@ function WallOpeningMarkers({
           key={opening.id}
           frame={frame}
           opening={opening}
+          siblingOpenings={openings.filter((item) => item.id !== opening.id)}
           onDelete={() => onDeleteOpening(opening.id)}
           onMove={(xMm, yMm) => onMoveOpening(opening.id, xMm, yMm)}
           onResize={(patch) => onResizeOpening(opening.id, patch)}
@@ -5290,6 +5430,7 @@ function WallOpening({
   opening,
   selected,
   showName,
+  siblingOpenings,
 }: {
   frame: WallFrame;
   onDelete: () => void;
@@ -5300,9 +5441,11 @@ function WallOpening({
   opening: Opening;
   selected: boolean;
   showName: boolean;
+  siblingOpenings: Opening[];
 }) {
   const openingGroupRef = useRef<Konva.Group>(null);
   const [dragPreview, setDragPreview] = useState<{ xMm: number; yMm: number } | null>(null);
+  const lastValidPositionRef = useRef({ xMm: opening.xMm, yMm: opening.yMm });
   const openingWidth = mmToCanvas(opening.widthMm);
   const openingHeight = mmToCanvas(opening.heightMm);
   const openingXmm = Math.max(0, Math.min(opening.xMm, Math.max(0, frame.widthMm - opening.widthMm)));
@@ -5331,24 +5474,34 @@ function WallOpening({
       onDragStart={(event) => {
         event.cancelBubble = true;
         event.currentTarget.moveToTop();
+        lastValidPositionRef.current = { xMm: openingXmm, yMm: openingYmm };
         setDragPreview({ xMm: openingXmm, yMm: openingYmm });
         onSelect();
       }}
       onDragMove={(event) => {
         event.cancelBubble = true;
         const node = event.currentTarget;
-        const x = Math.max(frame.x, Math.min(node.x(), frame.x + frame.width - openingWidth));
-        const y = opening.kind === 'window' ? Math.max(frame.y, Math.min(node.y(), frame.y + frame.height - openingHeight)) : openingY;
+        const requestedXmm = canvasToMm(node.x() - frame.x);
+        const requestedYmm = opening.kind === 'window' ? canvasToMm(node.y() - frame.y) : openingYmm;
+        const constrained = constrainOpeningPosition(
+          { widthMm: frame.widthMm, heightMm: frame.heightMm },
+          { ...opening, xMm: lastValidPositionRef.current.xMm, yMm: lastValidPositionRef.current.yMm },
+          siblingOpenings,
+          requestedXmm,
+          requestedYmm,
+        );
+        lastValidPositionRef.current = constrained;
+        const x = frame.x + mmToCanvas(constrained.xMm);
+        const y = opening.kind === 'window' ? frame.y + mmToCanvas(constrained.yMm) : openingY;
         node.position({ x, y });
-        setDragPreview({ xMm: Math.round(canvasToMm(x - frame.x)), yMm: Math.round(canvasToMm(y - frame.y)) });
+        setDragPreview({ xMm: constrained.xMm, yMm: constrained.yMm });
       }}
       onDragEnd={(event) => {
         event.cancelBubble = true;
         const node = event.currentTarget;
-        const x = Math.max(frame.x, Math.min(node.x(), frame.x + frame.width - openingWidth));
-        const y = opening.kind === 'window' ? Math.max(frame.y, Math.min(node.y(), frame.y + frame.height - openingHeight)) : openingY;
-        node.position({ x, y });
-        onMove(canvasToMm(x - frame.x), opening.kind === 'window' ? canvasToMm(y - frame.y) : undefined);
+        const { xMm, yMm } = lastValidPositionRef.current;
+        node.position({ x: frame.x + mmToCanvas(xMm), y: opening.kind === 'window' ? frame.y + mmToCanvas(yMm) : openingY });
+        onMove(xMm, opening.kind === 'window' ? yMm : undefined);
         setDragPreview(null);
       }}
       onMouseDown={(event) => {
@@ -5597,6 +5750,7 @@ function WallZoneLayer({
   openings,
   selected,
   showEdgeCuts,
+  showRoomDimensions,
   zone,
 }: {
   frame: WallFrame;
@@ -5610,6 +5764,7 @@ function WallZoneLayer({
   openings: Opening[];
   selected: boolean;
   showEdgeCuts: boolean;
+  showRoomDimensions: boolean;
   zone: FinishZone;
 }) {
   const [polygonDragDelta, setPolygonDragDelta] = useState<PointMm | null>(null);
@@ -5711,7 +5866,17 @@ function WallZoneLayer({
           ))}
         </Group>
         <Line points={points} closed fill="rgba(242, 235, 249, 0.12)" stroke={selected ? '#6F4F93' : '#A385C4'} strokeWidth={selected ? 3 : 1.5} dash={selected ? undefined : [8, 6]} />
-        {selected ? (
+        {selected && showEdgeCuts && !polygonDragDelta ? (
+          <EdgeCutLabels
+            edgeCuts={result.edgeOffsets}
+            height={mmToCanvas(bounds.height)}
+            onEditOffset={onEditOffset}
+            width={mmToCanvas(bounds.width)}
+            x={frame.x + mmToCanvas(bounds.minX)}
+            y={frame.y + mmToCanvas(bounds.minY)}
+          />
+        ) : null}
+        {selected && showRoomDimensions && polygonDragDelta ? (
           <Group x={frame.x + mmToCanvas(bounds.minX)} y={frame.y + mmToCanvas(bounds.minY)}>
             <OpeningDistanceLabels
               bottomDistanceMm={Math.round(Math.max(0, frame.heightMm - displayedBounds.maxY))}
@@ -5726,6 +5891,19 @@ function WallZoneLayer({
               yInFrame={mmToCanvas(displayedBounds.minY)}
             />
           </Group>
+        ) : null}
+        {selected && showRoomDimensions && !polygonDragDelta ? (
+          <ZonePolygonSizeLabels
+            labelPosition={(point, next) =>
+              getFloorSegmentDimensionPosition(zone.shape.points, point, next, {
+                scale: 1,
+                toPoint: () => ({ x: 0, y: 0 }),
+                x: (value) => frame.x + mmToCanvas(value),
+                y: (value) => frame.y + mmToCanvas(value),
+              })
+            }
+            points={zone.shape.points}
+          />
         ) : null}
       </Group>
     );
@@ -5801,8 +5979,8 @@ function WallZoneLayer({
       </Group>
       <Rect x={x} y={y} width={width} height={height} fill="rgba(242, 235, 249, 0.16)" stroke={selected ? '#6F4F93' : '#A385C4'} strokeWidth={selected ? 3 : 1.5} dash={selected ? undefined : [8, 6]} />
       {selected ? <ZoneResizeHandles height={height} onResize={onShapeChange} shape={shape} surfaceHeightMm={frame.heightMm} surfaceWidthMm={frame.widthMm} width={width} x={x} y={y} /> : null}
-      {selected && showEdgeCuts ? <EdgeCutLabels edgeCuts={result.edgeOffsets} height={height} onEditOffset={onEditOffset} width={width} x={x} y={y} /> : null}
-      {selected ? (
+      {selected && showEdgeCuts && !rectDragDelta ? <EdgeCutLabels edgeCuts={result.edgeOffsets} height={height} onEditOffset={onEditOffset} width={width} x={x} y={y} /> : null}
+      {selected && showRoomDimensions && rectDragDelta ? (
         <Group x={x} y={y}>
           <ZoneDistanceLabels
             frameHeightMm={frame.heightMm}
@@ -5813,6 +5991,9 @@ function WallZoneLayer({
             yMm={displayedYmm}
           />
         </Group>
+      ) : null}
+      {selected && showRoomDimensions && !rectDragDelta ? (
+        <ZoneRectSizeLabels height={height} heightMm={shape.heightMm} width={width} widthMm={shape.widthMm} x={x} y={y} />
       ) : null}
     </Group>
   );
@@ -5882,12 +6063,14 @@ function FloorZoneLayer({
   maskPositionFor,
   material,
   onEditOffset,
+  onDragStateChange,
   onPolygonChange,
   onSelect,
   onShapeChange,
   opacity,
   selected,
   showEdgeCuts,
+  showRoomDimensions,
   surfaceContour,
   view,
   zone,
@@ -5896,12 +6079,14 @@ function FloorZoneLayer({
   maskPositionFor?: (object: RoomObject) => { rotationDeg: number; xMm: number; yMm: number };
   material: TileMaterial;
   onEditOffset: (edge: keyof LayoutEdgeCuts) => void;
+  onDragStateChange?: (dragging: boolean) => void;
   onPolygonChange: (points: PointMm[]) => void;
   onSelect: () => void;
   onShapeChange: (patch: Partial<Extract<FinishZone['shape'], { type: 'rect' }>>) => void;
   opacity: number;
   selected: boolean;
   showEdgeCuts: boolean;
+  showRoomDimensions: boolean;
   surfaceContour: PointMm[];
   view: PlanViewTransform;
   zone: FinishZone;
@@ -5927,9 +6112,11 @@ function FloorZoneLayer({
         onDragStart={(event) => {
           if (!selected) return;
           event.cancelBubble = true;
+          event.currentTarget.moveToTop();
           polygonDragSessionRef.current = createPolygonDragSession(event.currentTarget);
           polygonDragDeltaRef.current = { x: 0, y: 0 };
           setPolygonDragDelta({ x: 0, y: 0 });
+          onDragStateChange?.(true);
           onSelect();
         }}
         onDragMove={(event) => {
@@ -5953,15 +6140,18 @@ function FloorZoneLayer({
           polygonDragSessionRef.current = null;
           polygonDragDeltaRef.current = { x: 0, y: 0 };
           setPolygonDragDelta(null);
+          onDragStateChange?.(false);
           if (finalDelta.x || finalDelta.y) onPolygonChange(translatePolygon(zone.shape.points, finalDelta.x, finalDelta.y));
         }}
       >
         <FloorTileLayout blockedObjects={blockedObjects} contour={zone.shape.points} layout={zone.layout} maskPositionFor={maskPositionFor} material={material} opacity={opacity} view={view} />
         <Line points={canvasPoints} closed fill="rgba(242, 235, 249, 0.10)" stroke={selected ? '#6F4F93' : '#A385C4'} strokeWidth={selected ? 3 : 1.5} dash={selected ? undefined : [8, 6]} />
-        {selected && showEdgeCuts ? <FloorEdgeCutLabels contour={zone.shape.points} layout={zone.layout} material={material} onEditOffset={onEditOffset} view={view} /> : null}
         {selected && !zone.locked ? <PolygonZoneHandles points={zone.shape.points} surfaceContour={surfaceContour} view={view} onChange={onPolygonChange} /> : null}
-        {selected ? (
-          <Group x={view.x(zoneBox.minX)} y={view.y(zoneBox.minY)} listening={false}>
+        {selected && showEdgeCuts && !polygonDragDelta ? (
+          <FloorEdgeCutLabels contour={zone.shape.points} layout={zone.layout} material={material} onEditOffset={onEditOffset} view={view} />
+        ) : null}
+        {selected && showRoomDimensions && polygonDragDelta ? (
+          <Group x={view.x(zoneBox.minX)} y={view.y(zoneBox.minY)}>
             <ZoneDistanceLabels
               frameHeightMm={surfaceBox.height}
               frameWidthMm={surfaceBox.width}
@@ -5971,6 +6161,12 @@ function FloorZoneLayer({
               yMm={zoneBox.minY - surfaceBox.minY + displayedDelta.y}
             />
           </Group>
+        ) : null}
+        {selected && showRoomDimensions && !polygonDragDelta ? (
+          <ZonePolygonSizeLabels
+            labelPosition={(point, next) => getFloorSegmentDimensionPosition(zone.shape.points, point, next, view)}
+            points={zone.shape.points}
+          />
         ) : null}
       </Group>
     );
@@ -6012,7 +6208,9 @@ function FloorZoneLayer({
       onDragStart={(event) => {
         if (!selected) return;
         event.cancelBubble = true;
+        event.currentTarget.moveToTop();
         setRectDragDelta({ x: 0, y: 0 });
+        onDragStateChange?.(true);
         onSelect();
       }}
       onDragMove={(event) => {
@@ -6032,6 +6230,7 @@ function FloorZoneLayer({
         const nextY = shape.yMm + canvasToMm(node.y());
         node.position({ x: 0, y: 0 });
         setRectDragDelta(null);
+        onDragStateChange?.(false);
         onShapeChange({ xMm: nextX, yMm: nextY });
       }}
     >
@@ -6057,8 +6256,8 @@ function FloorZoneLayer({
       </Group>
       <Rect x={x} y={y} width={width} height={height} fill="rgba(242, 235, 249, 0.16)" stroke={selected ? '#6F4F93' : '#A385C4'} strokeWidth={selected ? 3 : 1.5} dash={selected ? undefined : [8, 6]} />
       {selected ? <ZoneResizeHandles height={height} onResize={onShapeChange} shape={zone.shape} surfaceHeightMm={surfaceBox.height} surfaceWidthMm={surfaceBox.width} width={width} x={x} y={y} /> : null}
-      {selected && showEdgeCuts ? <EdgeCutLabels edgeCuts={result.edgeOffsets} height={height} onEditOffset={onEditOffset} width={width} x={x} y={y} /> : null}
-      {selected ? (
+      {selected && showEdgeCuts && !rectDragDelta ? <EdgeCutLabels edgeCuts={result.edgeOffsets} height={height} onEditOffset={onEditOffset} width={width} x={x} y={y} /> : null}
+      {selected && showRoomDimensions && rectDragDelta ? (
         <Group x={x} y={y}>
           <ZoneDistanceLabels
             frameHeightMm={surfaceBox.height}
@@ -6070,6 +6269,51 @@ function FloorZoneLayer({
           />
         </Group>
       ) : null}
+      {selected && showRoomDimensions && !rectDragDelta ? (
+        <ZoneRectSizeLabels height={height} heightMm={shape.heightMm} width={width} widthMm={shape.widthMm} x={x} y={y} />
+      ) : null}
+    </Group>
+  );
+}
+
+function ZoneRectSizeLabels({ height, heightMm, width, widthMm, x, y }: {
+  height: number;
+  heightMm: number;
+  width: number;
+  widthMm: number;
+  x: number;
+  y: number;
+}) {
+  const widthText = `${Math.round(widthMm)} мм`;
+  const heightText = `${Math.round(heightMm)} мм`;
+  return (
+    <Group listening={false}>
+      <DimensionLabel x={x + width / 2} y={y - 20} text={widthText} />
+      <DimensionLabel x={x + width / 2} y={y + height + 20} text={widthText} />
+      <DimensionLabel x={x - 42} y={y + height / 2} text={heightText} />
+      <DimensionLabel x={x + width + 42} y={y + height / 2} text={heightText} />
+    </Group>
+  );
+}
+
+function ZonePolygonSizeLabels({ labelPosition, points }: {
+  labelPosition: (point: PointMm, next: PointMm) => { x: number; y: number };
+  points: PointMm[];
+}) {
+  return (
+    <Group listening={false}>
+      {points.map((point, index) => {
+        const next = points[(index + 1) % points.length];
+        const label = labelPosition(point, next);
+        return (
+          <DimensionLabel
+            key={`zone-edge-${index}`}
+            x={label.x}
+            y={label.y}
+            text={`${Math.round(segmentLength(point, next))} мм`}
+          />
+        );
+      })}
     </Group>
   );
 }
@@ -6599,39 +6843,122 @@ function TilePresetCard({ active, onSelect, tile }: { active: boolean; onSelect:
   );
 }
 
+const GROUT_PRESETS_MM = [0, 0.5, 1, 2, 3];
+
+function formatGroutLabel(groutMm: number) {
+  const value = Number.isInteger(groutMm) ? String(groutMm) : groutMm.toFixed(1).replace(/\.0$/, '');
+  return `${value} мм`;
+}
+
+function GroutControl({
+  disabled,
+  groutMm,
+  onGroutChange,
+  onOpenChange,
+  open,
+}: {
+  disabled: boolean;
+  groutMm: number;
+  onGroutChange: (groutMm: number) => void;
+  onOpenChange: (open: boolean) => void;
+  open: boolean;
+}) {
+  const [customOpen, setCustomOpen] = useState(false);
+  const isPreset = GROUT_PRESETS_MM.some((value) => Math.abs(value - groutMm) < 0.05);
+
+  return (
+    <section className="panel-module grout-module">
+      <h1 className="panel-module-title">Размер швов</h1>
+      <details
+        className="panel-card panel-section layout-options-select grout-options-select"
+        open={open}
+        onToggle={(event) => {
+          onOpenChange(event.currentTarget.open);
+          if (!event.currentTarget.open) setCustomOpen(false);
+        }}
+      >
+        <summary className="layout-options-summary">
+          <strong>{formatGroutLabel(groutMm)}</strong>
+        </summary>
+        <div className="layout-page single-page">
+          <div className="layout-secondary-grid grout-pattern-grid">
+            {GROUT_PRESETS_MM.map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={Math.abs(value - groutMm) < 0.05 ? 'active' : ''}
+                disabled={disabled}
+                onClick={() => {
+                  setCustomOpen(false);
+                  onGroutChange(value);
+                }}
+              >
+                {formatGroutLabel(value)}
+              </button>
+            ))}
+            <button
+              type="button"
+              className={!isPreset || customOpen ? 'active' : ''}
+              disabled={disabled}
+              onClick={() => setCustomOpen(true)}
+            >
+              Свой
+            </button>
+          </div>
+          {customOpen || !isPreset ? (
+            <label className="grout-custom-field">
+              Свой вариант
+              <input
+                type="number"
+                min={0}
+                max={50}
+                step={0.1}
+                value={groutMm}
+                disabled={disabled}
+                onChange={(event) => onGroutChange(Number(event.currentTarget.value))}
+              />
+              <span>мм</span>
+            </label>
+          ) : null}
+        </div>
+      </details>
+    </section>
+  );
+}
+
 function LayoutControl({
-  layout,
-  layoutDragEnabled,
+  layoutRotateEnabled,
   material,
   openSection,
   onOpenSectionChange,
   onOriginModeChange,
-  onOffsetInput,
   onOffsetReset,
   onOffsetStep,
   onPatternChange,
   onStaggerChange,
   onToggleLayoutDrag,
+  onToggleLayoutRotate,
+  onTurnReset,
   surface,
   zone,
 }: {
-  layout: SurfaceLayout | undefined;
-  layoutDragEnabled: boolean;
+  layoutRotateEnabled: boolean;
   material: TileMaterial | null | undefined;
   openSection: TilePanelSection | null;
-  onOpenSectionChange: (section: TilePanelSection | null) => void;
+  onOpenSectionChange: (section: TilePanelSection | null | ((current: TilePanelSection | null) => TilePanelSection | null)) => void;
   onOriginModeChange: (originMode: SurfaceLayout['originMode']) => void;
-  onOffsetInput: (axis: 'x' | 'y', value: string) => void;
   onOffsetReset: () => void;
   onOffsetStep: (deltaXmm: number, deltaYmm: number) => void;
   onPatternChange: (pattern: LayoutPattern) => void;
   onStaggerChange: (stagger: LayoutStagger) => void;
   onToggleLayoutDrag: (enabled: boolean) => void;
+  onToggleLayoutRotate: (enabled: boolean) => void;
+  onTurnReset: () => void;
   surface: TileProject['surfaces'][number] | null | undefined;
   zone: FinishZone | null | undefined;
 }) {
   const handleSectionToggle = (section: TilePanelSection, open: boolean) => {
-    onOpenSectionChange(open ? section : openSection === section ? null : openSection);
+    onOpenSectionChange((current) => (open ? section : current === section ? null : current));
   };
   const modes: Array<{ label: string; title: string; value: SurfaceLayout['originMode'] }> = [
     { label: '↖', title: 'Левый верх', value: 'corner-tl' },
@@ -6644,8 +6971,6 @@ function LayoutControl({
     { label: '↓', title: 'Снизу', value: 'corner-b' },
     { label: '↘', title: 'Правый низ', value: 'corner-br' },
   ];
-  const offsetX = layout?.originXmm ?? 0;
-  const offsetY = layout?.originYmm ?? 0;
   const popularPatterns: Array<{ label: string; preview: 'brick' | 'deck' | 'diagonal' | 'herringbone' | 'straight'; value: LayoutPattern }> = [
     { label: 'Прямая укладка', preview: 'straight', value: 'straight' },
     { label: 'Кладка под кирпич', preview: 'brick', value: 'brick' },
@@ -6659,6 +6984,8 @@ function LayoutControl({
     { label: '1/3', value: 'third' },
     { label: '1/4', value: 'quarter' },
   ];
+  const selectedPattern = popularPatterns.find((pattern) => pattern.value === zone?.layout.pattern);
+  const selectedOffset = offsetPatterns.find((pattern) => pattern.value === (zone?.layout.stagger ?? getLegacyLayoutStagger(zone?.layout.pattern)));
 
   return (
     <>
@@ -6670,32 +6997,43 @@ function LayoutControl({
           onToggle={(event) => handleSectionToggle('laying', event.currentTarget.open)}
         >
           <summary className="layout-options-summary">
-            <strong>Популярные варианты</strong>
+            <strong>{selectedPattern?.label ?? 'Популярные варианты'}</strong>
           </summary>
           <div className="layout-page single-page">
             <div className="layout-secondary-grid laying-pattern-grid">
-              <button type="button" className={zone?.layout.originMode === 'tile-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('tile-center')}>Плитка в центре</button>
-              <button type="button" className={zone?.layout.originMode === 'joint-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('joint-center')}>Шов в центре</button>
               {popularPatterns.map((pattern) => (
                 <button key={pattern.value} type="button" className={zone?.layout.pattern === pattern.value ? 'layout-pattern-option active' : 'layout-pattern-option'} disabled={!zone} onClick={() => onPatternChange(pattern.value)}>
                   <LayoutPatternPreview pattern={pattern.preview} />
                   <span>{pattern.label}</span>
                 </button>
               ))}
-              <button
-                type="button"
-                disabled={!zone}
-                onClick={() => {
-                  onOriginModeChange('corner-tl');
-                  onPatternChange('straight');
-                  onStaggerChange('none');
-                  onOffsetReset();
-                  onToggleLayoutDrag(false);
-                }}
-              >
-                Сбросить
-              </button>
             </div>
+            <p className="layout-subsection-title">Точка старта</p>
+            <div className="center-mode-grid">
+              <button type="button" className={zone?.layout.originMode === 'tile-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('tile-center')}>Плитка в центре</button>
+              <button type="button" className={zone?.layout.originMode === 'joint-center' ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange('joint-center')}>Шов в центре</button>
+            </div>
+            <div className="origin-mode-grid">
+              {modes.map((mode) => (
+                <button key={mode.value} type="button" title={mode.title} aria-label={mode.title} className={zone?.layout.originMode === mode.value ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange(mode.value)}>{mode.label}</button>
+              ))}
+            </div>
+            <button
+              type="button"
+              className="layout-reset-button"
+              disabled={!zone}
+              onClick={() => {
+                onOriginModeChange('corner-tl');
+                onPatternChange('straight');
+                onStaggerChange('none');
+                onOffsetReset();
+                onToggleLayoutDrag(false);
+                onToggleLayoutRotate(false);
+                onTurnReset();
+              }}
+            >
+              Сбросить
+            </button>
             <LayoutMetrics material={material} surface={surface} zone={zone} />
           </div>
         </details>
@@ -6707,44 +7045,15 @@ function LayoutControl({
           open={openSection === 'offset'}
           onToggle={(event) => handleSectionToggle('offset', event.currentTarget.open)}
         >
-          <summary className="layout-options-summary"><strong>Выберите долю смещения</strong></summary>
+          <summary className="layout-options-summary"><strong>{selectedOffset?.label ?? 'Выберите долю смещения'}</strong></summary>
           <div className="layout-page single-page">
             <div className="layout-secondary-grid offset-pattern-grid">
               {offsetPatterns.map((pattern) => (
                 <button key={pattern.value} type="button" className={(zone?.layout.stagger ?? getLegacyLayoutStagger(zone?.layout.pattern)) === pattern.value ? 'active' : ''} disabled={!zone} onClick={() => onStaggerChange(pattern.value)}>{pattern.label}</button>
               ))}
             </div>
-          </div>
-        </details>
-      </section>
-      <section className="panel-module origin-module">
-        <h1 className="panel-module-title">Точка старта</h1>
-        <details
-          className="panel-card panel-section layout-options-select origin-options-select"
-          open={openSection === 'origin'}
-          onToggle={(event) => handleSectionToggle('origin', event.currentTarget.open)}
-        >
-          <summary className="layout-options-summary"><strong>Выберите точку старта</strong></summary>
-          <div className="origin-options-content">
-            <div className="origin-mode-grid">
-              {modes.map((mode) => (
-                <button key={mode.value} type="button" title={mode.title} aria-label={mode.title} className={zone?.layout.originMode === mode.value ? 'active' : ''} disabled={!zone} onClick={() => onOriginModeChange(mode.value)}>{mode.label}</button>
-              ))}
-            </div>
-          </div>
-        </details>
-      </section>
-      <section className="panel-module movement-module">
-        <h1 className="panel-module-title">Движение</h1>
-        <details
-          className="panel-card panel-section layout-options-select movement-options-select"
-          open={openSection === 'movement'}
-          onToggle={(event) => handleSectionToggle('movement', event.currentTarget.open)}
-        >
-          <summary className="layout-options-summary"><strong>Перемещение плитки</strong></summary>
-          <div className="movement-options-content">
             <div className="layout-control layout-move-card">
-              <button type="button" className={layoutDragEnabled ? 'layout-drag-button active' : 'layout-drag-button'} disabled={!zone} aria-pressed={layoutDragEnabled} onClick={() => onToggleLayoutDrag(!layoutDragEnabled)}>Двигать мышью</button>
+              <button type="button" className={layoutRotateEnabled ? 'layout-drag-button active' : 'layout-drag-button'} disabled={!zone} aria-pressed={layoutRotateEnabled} onClick={() => onToggleLayoutRotate(!layoutRotateEnabled)}>Крутить</button>
               <div className="layout-offset-control">
                 <button type="button" aria-label="Сдвинуть влево вверх" disabled={!zone} onClick={() => onOffsetStep(-10, -10)}>↖</button>
                 <button type="button" aria-label="Сдвинуть вверх" disabled={!zone} onClick={() => onOffsetStep(0, -10)}><ArrowUp size={15} /></button>
@@ -6755,10 +7064,6 @@ function LayoutControl({
                 <button type="button" aria-label="Сдвинуть влево вниз" disabled={!zone} onClick={() => onOffsetStep(-10, 10)}>↙</button>
                 <button type="button" aria-label="Сдвинуть вниз" disabled={!zone} onClick={() => onOffsetStep(0, 10)}><ArrowDown size={15} /></button>
                 <button type="button" aria-label="Сдвинуть вправо вниз" disabled={!zone} onClick={() => onOffsetStep(10, 10)}>↘</button>
-              </div>
-              <div className="layout-offset-fields">
-                <label>X<input type="number" step={10} value={offsetX} disabled={!zone} onChange={(event) => onOffsetInput('x', event.currentTarget.value)} /></label>
-                <label>Y<input type="number" step={10} value={offsetY} disabled={!zone} onChange={(event) => onOffsetInput('y', event.currentTarget.value)} /></label>
               </div>
             </div>
           </div>
@@ -7429,6 +7734,75 @@ function pointerToPlanPoint(pointer: { x: number; y: number }, viewport: CanvasV
   return view.toPoint(canvasX, canvasY);
 }
 
+function getLayoutRotationCenter({
+  planView,
+  project,
+  selectedSurfaceId,
+  selectedZoneId,
+  viewport,
+  wallFrames,
+}: {
+  planView: PlanViewTransform;
+  project: TileProject;
+  selectedSurfaceId: string;
+  selectedZoneId: string | null;
+  viewport: CanvasViewport;
+  wallFrames: WallFrame[];
+}): { x: number; y: number } | null {
+  const surface = project.surfaces.find((item) => item.id === selectedSurfaceId);
+  if (!surface) return null;
+  const zone = selectedZoneId
+    ? surface.zones.find((item) => item.id === selectedZoneId)
+    : surface.zones[0];
+  const isExtraZone = Boolean(zone && selectedZoneId && zone.id !== surface.zones[0]?.id);
+
+  if (surface.type === 'wall') {
+    const frame = wallFrames.find((item) => item.id === surface.id);
+    if (!frame) return null;
+    if (isExtraZone && zone?.shape.type === 'rect') {
+      return {
+        x: viewport.x + (frame.x + mmToCanvas(zone.shape.xMm + zone.shape.widthMm / 2)) * viewport.zoom,
+        y: viewport.y + (frame.y + mmToCanvas(zone.shape.yMm + zone.shape.heightMm / 2)) * viewport.zoom,
+      };
+    }
+    if (isExtraZone && zone?.shape.type === 'polygon') {
+      const box = getBoundingBox(zone.shape.points);
+      return {
+        x: viewport.x + (frame.x + mmToCanvas(box.minX + box.width / 2)) * viewport.zoom,
+        y: viewport.y + (frame.y + mmToCanvas(box.minY + box.height / 2)) * viewport.zoom,
+      };
+    }
+    return {
+      x: viewport.x + (frame.x + frame.width / 2) * viewport.zoom,
+      y: viewport.y + (frame.y + frame.height / 2) * viewport.zoom,
+    };
+  }
+
+  if (isExtraZone && zone?.shape.type === 'polygon') {
+    const box = getBoundingBox(zone.shape.points);
+    return {
+      x: viewport.x + planView.x(box.minX + box.width / 2) * viewport.zoom,
+      y: viewport.y + planView.y(box.minY + box.height / 2) * viewport.zoom,
+    };
+  }
+
+  const areaId = surface.sourceRef?.split(':')[1];
+  const contour = project.room.areas?.find((area) => area.id === areaId)?.contour ?? project.room.contour;
+  if (isExtraZone && zone?.shape.type === 'rect') {
+    const surfaceBox = getBoundingBox(contour);
+    return {
+      x: viewport.x + planView.x(surfaceBox.minX + zone.shape.xMm + zone.shape.widthMm / 2) * viewport.zoom,
+      y: viewport.y + planView.y(surfaceBox.minY + zone.shape.yMm + zone.shape.heightMm / 2) * viewport.zoom,
+    };
+  }
+
+  const box = areaId ? getSharedFloorLayoutBox(project, areaId) : getBoundingBox(contour);
+  return {
+    x: viewport.x + planView.x(box.minX + box.width / 2) * viewport.zoom,
+    y: viewport.y + planView.y(box.minY + box.height / 2) * viewport.zoom,
+  };
+}
+
 function getPlanView(_contour: PointMm[]): PlanViewTransform {
   return {
     scale: PX_PER_MM,
@@ -7463,13 +7837,12 @@ function getWallLayout(project: TileProject, view: PlanViewTransform, collapsedA
   const frames: WallFrame[] = [];
   const sections: WallAreaSection[] = [];
   const horizontalInset = 16;
-  const headerWidthReduction = gridPxForMm(MINOR_GRID_MM);
   const sectionWidth = Math.max(
     300,
     ...areas.map((area) => (wallsByArea.get(area.id) ?? []).slice(0, 4).reduce(
       (width, { wall }, index) => width + mmToCanvas(wall.widthMm) + (index ? gap : 0),
       horizontalInset * 2,
-    ) - headerWidthReduction),
+    )),
   );
   for (const area of areas) {
     const areaWalls = wallsByArea.get(area.id) ?? [];

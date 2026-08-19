@@ -12,6 +12,144 @@ const DEFAULT_DOOR_HEIGHT_MM = 2100;
 const DEFAULT_PASSAGE_WIDTH_MM = 900;
 const DEFAULT_WINDOW_SIZE_MM = 1000;
 const MIN_OPENING_SIZE_MM = 300;
+
+type OpeningRect = Pick<Opening, 'xMm' | 'yMm' | 'widthMm' | 'heightMm'>;
+
+export function openingRectsOverlap(a: OpeningRect, b: OpeningRect): boolean {
+  return a.xMm < b.xMm + b.widthMm && a.xMm + a.widthMm > b.xMm
+    && a.yMm < b.yMm + b.heightMm && a.yMm + a.heightMm > b.yMm;
+}
+
+function getOpeningsOnSurface(project: TileProject, surfaceId: string, ignoreId?: string): Opening[] {
+  return (project.room.openings ?? []).filter((item) => item.surfaceId === surfaceId && item.id !== ignoreId);
+}
+
+function openingFitsOnSurface(surface: Pick<Surface, 'widthMm' | 'heightMm'>, opening: OpeningRect, others: Opening[]): boolean {
+  if (opening.xMm < 0 || opening.yMm < 0) return false;
+  if (opening.xMm + opening.widthMm > surface.widthMm) return false;
+  if (opening.yMm + opening.heightMm > surface.heightMm) return false;
+  return !others.some((other) => openingRectsOverlap(opening, other));
+}
+
+function clampOpeningCoord(value: number, max: number): number {
+  return Math.max(0, Math.min(Math.round(value), Math.max(0, max)));
+}
+
+function resolveOpeningPosition(
+  surface: Pick<Surface, 'widthMm' | 'heightMm'>,
+  opening: OpeningRect,
+  others: Opening[],
+  requestedX: number,
+  requestedY: number,
+): { xMm: number; yMm: number } {
+  const maxX = Math.max(0, surface.widthMm - opening.widthMm);
+  const maxY = Math.max(0, surface.heightMm - opening.heightMm);
+  let x = clampOpeningCoord(requestedX, maxX);
+  let y = clampOpeningCoord(requestedY, maxY);
+  const fits = (testX: number, testY: number) => openingFitsOnSurface(surface, { ...opening, xMm: testX, yMm: testY }, others);
+  if (fits(x, y)) return { xMm: x, yMm: y };
+
+  const candidates: Array<{ xMm: number; yMm: number; dist: number }> = [{
+    xMm: opening.xMm,
+    yMm: opening.yMm,
+    dist: Math.hypot(opening.xMm - requestedX, opening.yMm - requestedY),
+  }];
+  for (const other of others) {
+    const snapPositions = [
+      { xMm: other.xMm + other.widthMm, yMm: y },
+      { xMm: other.xMm - opening.widthMm, yMm: y },
+      { xMm: x, yMm: other.yMm + other.heightMm },
+      { xMm: x, yMm: other.yMm - opening.heightMm },
+      { xMm: other.xMm + other.widthMm, yMm: other.yMm },
+      { xMm: other.xMm - opening.widthMm, yMm: other.yMm },
+    ];
+    for (const pos of snapPositions) {
+      const sx = clampOpeningCoord(pos.xMm, maxX);
+      const sy = clampOpeningCoord(pos.yMm, maxY);
+      candidates.push({ xMm: sx, yMm: sy, dist: Math.hypot(sx - requestedX, sy - requestedY) });
+    }
+  }
+  candidates.sort((a, b) => a.dist - b.dist);
+  for (const candidate of candidates) {
+    if (fits(candidate.xMm, candidate.yMm)) return { xMm: candidate.xMm, yMm: candidate.yMm };
+  }
+
+  for (let iter = 0; iter < others.length + 2; iter++) {
+    let adjusted = false;
+    for (const other of others) {
+      if (!openingRectsOverlap({ ...opening, xMm: x, yMm: y }, other)) continue;
+      adjusted = true;
+      const options = [
+        { xMm: other.xMm + other.widthMm, yMm: y },
+        { xMm: other.xMm - opening.widthMm, yMm: y },
+        { xMm: x, yMm: other.yMm + other.heightMm },
+        { xMm: x, yMm: other.yMm - opening.heightMm },
+      ]
+        .map((pos) => ({
+          xMm: clampOpeningCoord(pos.xMm, maxX),
+          yMm: clampOpeningCoord(pos.yMm, maxY),
+          dist: Math.hypot(clampOpeningCoord(pos.xMm, maxX) - requestedX, clampOpeningCoord(pos.yMm, maxY) - requestedY),
+        }))
+        .sort((a, b) => a.dist - b.dist);
+      for (const option of options) {
+        if (fits(option.xMm, option.yMm)) {
+          x = option.xMm;
+          y = option.yMm;
+          break;
+        }
+      }
+    }
+    if (fits(x, y)) return { xMm: x, yMm: y };
+    if (!adjusted) break;
+  }
+
+  return { xMm: opening.xMm, yMm: opening.yMm };
+}
+
+function findOpeningPosition(surface: Pick<Surface, 'widthMm' | 'heightMm'>, template: OpeningRect, others: Opening[]): { xMm: number; yMm: number } | null {
+  const centerX = Math.max(0, Math.round((surface.widthMm - template.widthMm) / 2));
+  const candidates: Array<{ xMm: number; yMm: number }> = [
+    { xMm: centerX, yMm: template.yMm },
+    { xMm: 0, yMm: template.yMm },
+    { xMm: surface.widthMm - template.widthMm, yMm: template.yMm },
+  ];
+  for (const other of others) {
+    candidates.push(
+      { xMm: other.xMm + other.widthMm, yMm: template.yMm },
+      { xMm: other.xMm - template.widthMm, yMm: template.yMm },
+      { xMm: other.xMm, yMm: other.yMm + other.heightMm },
+      { xMm: other.xMm, yMm: other.yMm - template.heightMm },
+      { xMm: other.xMm + other.widthMm, yMm: other.yMm },
+      { xMm: other.xMm - template.widthMm, yMm: other.yMm },
+    );
+  }
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const xMm = clampOpeningCoord(candidate.xMm, surface.widthMm - template.widthMm);
+    const yMm = clampOpeningCoord(candidate.yMm, surface.heightMm - template.heightMm);
+    const key = `${xMm}:${yMm}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (openingFitsOnSurface(surface, { ...template, xMm, yMm }, others)) return { xMm, yMm };
+  }
+  for (let xMm = 0; xMm <= surface.widthMm - template.widthMm; xMm++) {
+    const yValues = template.heightMm >= surface.heightMm ? [template.yMm] : Array.from({ length: surface.heightMm - template.heightMm + 1 }, (_, index) => index);
+    for (const yMm of yValues) {
+      if (openingFitsOnSurface(surface, { ...template, xMm, yMm }, others)) return { xMm, yMm };
+    }
+  }
+  return null;
+}
+
+export function constrainOpeningPosition(
+  surface: Pick<Surface, 'widthMm' | 'heightMm'>,
+  opening: OpeningRect,
+  others: Opening[],
+  xMm: number,
+  yMm: number,
+): { xMm: number; yMm: number } {
+  return resolveOpeningPosition(surface, opening, others, xMm, yMm);
+}
 const MIN_OBJECT_SIZE_MM = 1;
 const OBJECT_BOUNDARY_TOLERANCE_MM = 1.5;
 const WALL_OBJECT_TOUCH_TOLERANCE_MM = 40;
@@ -49,7 +187,7 @@ export function getRoomObjectCorners(footprint: RoomObjectFootprint): PointMm[] 
   }));
 }
 
-export function createProjectFromTemplate(template: RoomTemplate, size?: [number, number], previous?: TileProject, carryOverAssignments = true): TileProject {
+export function createProjectFromTemplate(template: RoomTemplate, size?: [number, number], previous?: TileProject, carryOverAssignments = true, carryOverExtraZones = carryOverAssignments): TileProject {
   const now = new Date().toISOString();
   const contour = createContourFromTemplate(template, size);
   const heightMm = validateRoomHeight(template.heightMm || serviceConfig.defaults.roomHeightMm);
@@ -73,7 +211,7 @@ export function createProjectFromTemplate(template: RoomTemplate, size?: [number
     // collide with the primary room's ids. Merging assignments in that case
     // would incorrectly drag the primary room's extra zones into the new room,
     // so callers adding another room (not replacing the primary one) opt out.
-    surfaces: mergeSurfaceAssignments(createSurfacesFromRoom(normalizeRoomModel({ templateId: template.id === 'custom' ? null : template.id, heightMm, contour }), primaryMaterial.id, settings), carryOverAssignments ? previous?.surfaces : undefined, materials, primaryMaterial.id),
+    surfaces: mergeSurfaceAssignments(createSurfacesFromRoom(normalizeRoomModel({ templateId: template.id === 'custom' ? null : template.id, heightMm, contour }), primaryMaterial.id, settings), carryOverAssignments ? previous?.surfaces : undefined, materials, primaryMaterial.id, carryOverExtraZones),
     objects: [],
     materials,
     settings,
@@ -116,7 +254,7 @@ export function updateRoomAreaHeight(project: TileProject, areaId: string, heigh
   };
 }
 
-export function updateRoomContour(project: TileProject, contour: TileProject['room']['contour'], shapeLocked?: boolean): TileProject {
+export function updateRoomContour(project: TileProject, contour: TileProject['room']['contour'], shapeLocked?: boolean, carryOverExtraZones = true): TileProject {
   const normalized = ensureProjectDefaults(project);
   const materialId = getPrimaryMaterial(normalized)?.id ?? null;
   const room = normalizeRoomModel({
@@ -128,7 +266,7 @@ export function updateRoomContour(project: TileProject, contour: TileProject['ro
     ...normalized,
     updatedAt: new Date().toISOString(),
     room,
-    surfaces: createSurfacesWithAssignments(room, normalized, materialId),
+    surfaces: createSurfacesWithAssignments(room, normalized, materialId, carryOverExtraZones),
   };
 }
 
@@ -390,10 +528,56 @@ export function updateZoneLayoutStagger(
   };
 }
 
+export function updateZoneLayoutGrout(project: TileProject, surfaceId: string, zoneId: string, groutMm: number): TileProject {
+  const nextGroutMm = clampGroutMm(groutMm);
+  return {
+    ...project,
+    updatedAt: new Date().toISOString(),
+    settings: { ...project.settings, groutMm: nextGroutMm },
+    surfaces: project.surfaces.map((surface) => {
+      if (surface.id !== surfaceId) return surface;
+      return {
+        ...surface,
+        zones: surface.zones.map((zone) =>
+          zone.id === zoneId
+            ? { ...zone, layout: { ...zone.layout, groutMm: nextGroutMm } }
+            : zone,
+        ),
+      };
+    }),
+  };
+}
+
 export function updateSurfaceLayoutOffset(project: TileProject, surfaceId: string, originXmm: number, originYmm: number): TileProject {
   const normalized = ensureProjectDefaults(project);
   const zoneId = normalized.surfaces.find((surface) => surface.id === surfaceId)?.zones[0]?.id;
   return zoneId ? updateZoneLayoutOffset(normalized, surfaceId, zoneId, originXmm, originYmm) : normalized;
+}
+
+export function updateZoneLayoutTurn(project: TileProject, surfaceId: string, zoneId: string, turnDeg: number): TileProject {
+  const normalized = ensureProjectDefaults(project);
+  const nextTurnDeg = Number.isFinite(turnDeg) ? turnDeg : 0;
+  return {
+    ...normalized,
+    updatedAt: new Date().toISOString(),
+    surfaces: normalized.surfaces.map((surface) => {
+      if (surface.id !== surfaceId) return surface;
+      return {
+        ...surface,
+        zones: surface.zones.map((zone) =>
+          zone.id === zoneId
+            ? {
+                ...zone,
+                layout: {
+                  ...zone.layout,
+                  turnDeg: nextTurnDeg,
+                },
+              }
+            : zone,
+        ),
+      };
+    }),
+  };
 }
 
 export function updateZoneLayoutOffset(project: TileProject, surfaceId: string, zoneId: string, originXmm: number, originYmm: number): TileProject {
@@ -866,9 +1050,13 @@ export function addOpeningDetailed(project: TileProject, surfaceId: string, kind
   const areaHeight = normalized.room.areas?.find((area) => area.id === areaId)?.heightMm ?? normalized.room.heightMm;
   const number = kind === 'window' ? undefined : Math.max(0, ...(normalized.room.openings ?? []).filter((item) => item.kind === kind).map((item) => item.number ?? 0)) + 1;
   const opening = createCenteredOpening(surface.id, kind, surface.widthMm, areaHeight, number, dimensions);
+  const others = getOpeningsOnSurface(normalized, surface.id);
+  const position = findOpeningPosition(surface, opening, others);
+  if (!position) return { opening: null, project: normalized };
+  const placedOpening = { ...opening, xMm: position.xMm, yMm: position.yMm, initialXmm: position.xMm, initialYmm: position.yMm };
   const room = normalizeRoomModel({
     ...normalized.room,
-    openings: [...(normalized.room.openings ?? []), opening],
+    openings: [...(normalized.room.openings ?? []), placedOpening],
   });
   const nextProject = {
     ...normalized,
@@ -876,7 +1064,7 @@ export function addOpeningDetailed(project: TileProject, surfaceId: string, kind
     room,
     surfaces: createSurfacesWithAssignments(room, normalized, materialId),
   };
-  return { opening, project: nextProject };
+  return { opening: placedOpening, project: nextProject };
 }
 
 export function moveOpening(project: TileProject, openingId: string, xMm: number, yMm?: number): TileProject {
@@ -888,7 +1076,10 @@ export function moveOpening(project: TileProject, openingId: string, xMm: number
   const nextYmm = opening.kind === 'window' && yMm !== undefined
     ? Math.max(0, Math.min(Math.round(yMm), Math.max(0, surface.heightMm - opening.heightMm)))
     : opening.yMm;
-  const movedOpening = { ...opening, xMm: nextXmm, yMm: nextYmm };
+  const others = getOpeningsOnSurface(normalized, opening.surfaceId, openingId);
+  const resolved = resolveOpeningPosition(surface, opening, others, nextXmm, nextYmm);
+  const movedOpening = { ...opening, xMm: resolved.xMm, yMm: resolved.yMm };
+  if (!openingFitsOnSurface(surface, movedOpening, others)) return normalized;
   if (!opening.connectedOpeningId || opening.kind === 'window') {
     return updateOpening(normalized, openingId, () => movedOpening);
   }
@@ -950,17 +1141,23 @@ export function resizeOpening(project: TileProject, openingId: string, patch: Pi
   const minWidthMm = Math.min(MIN_OPENING_SIZE_MM, surface.widthMm);
   const xMm = Math.max(0, Math.min(Math.round(patch.xMm), Math.max(0, surface.widthMm - minWidthMm)));
   const widthMm = Math.max(minWidthMm, Math.min(Math.round(patch.widthMm), surface.widthMm - xMm));
+  const others = getOpeningsOnSurface(normalized, opening.surfaceId, openingId);
+  let resizedOpening: Opening;
   if (opening.kind === 'passage') {
-    return updateOpening(normalized, openingId, (item) => ({ ...item, xMm, yMm: 0, widthMm, heightMm: surface.heightMm }));
+    resizedOpening = { ...opening, xMm, yMm: 0, widthMm, heightMm: surface.heightMm };
+  } else {
+    const minHeightMm = Math.min(MIN_OPENING_SIZE_MM, surface.heightMm);
+    const heightMm = Math.max(minHeightMm, Math.min(Math.round(patch.heightMm), surface.heightMm));
+    if (opening.kind === 'door') {
+      resizedOpening = { ...opening, xMm, yMm: surface.heightMm - heightMm, widthMm, heightMm };
+    } else {
+      const yMm = Math.max(0, Math.min(Math.round(patch.yMm), Math.max(0, surface.heightMm - minHeightMm)));
+      const windowHeightMm = Math.max(minHeightMm, Math.min(heightMm, surface.heightMm - yMm));
+      resizedOpening = { ...opening, xMm, yMm, widthMm, heightMm: windowHeightMm };
+    }
   }
-  const minHeightMm = Math.min(MIN_OPENING_SIZE_MM, surface.heightMm);
-  const heightMm = Math.max(minHeightMm, Math.min(Math.round(patch.heightMm), surface.heightMm));
-  if (opening.kind === 'door') {
-    return updateOpening(normalized, openingId, (item) => ({ ...item, xMm, yMm: surface.heightMm - heightMm, widthMm, heightMm }));
-  }
-  const yMm = Math.max(0, Math.min(Math.round(patch.yMm), Math.max(0, surface.heightMm - minHeightMm)));
-  const windowHeightMm = Math.max(minHeightMm, Math.min(heightMm, surface.heightMm - yMm));
-  return updateOpening(normalized, openingId, (item) => ({ ...item, xMm, yMm, widthMm, heightMm: windowHeightMm }));
+  if (!openingFitsOnSurface(surface, resizedOpening, others)) return normalized;
+  return updateOpening(normalized, openingId, () => resizedOpening);
 }
 
 export function resetOpening(project: TileProject, openingId: string): TileProject {
@@ -1986,11 +2183,11 @@ function assignMaterialToZone(project: TileProject, surfaceId: string, zoneId: s
   };
 }
 
-function createSurfacesWithAssignments(room: Room, previous: TileProject, fallbackMaterialId: string | null): Surface[] {
-  return mergeSurfaceAssignments(createSurfacesFromRoom(room, fallbackMaterialId, previous.settings), previous.surfaces, previous.materials, fallbackMaterialId);
+function createSurfacesWithAssignments(room: Room, previous: TileProject, fallbackMaterialId: string | null, carryOverExtraZones = true): Surface[] {
+  return mergeSurfaceAssignments(createSurfacesFromRoom(room, fallbackMaterialId, previous.settings), previous.surfaces, previous.materials, fallbackMaterialId, carryOverExtraZones);
 }
 
-function mergeSurfaceAssignments(nextSurfaces: Surface[], previousSurfaces: Surface[] = [], materials: TileMaterial[], fallbackMaterialId: string | null): Surface[] {
+function mergeSurfaceAssignments(nextSurfaces: Surface[], previousSurfaces: Surface[] = [], materials: TileMaterial[], fallbackMaterialId: string | null, carryOverExtraZones = true): Surface[] {
   const materialIds = new Set(materials.map((material) => material.id));
   return nextSurfaces.map((surface) => {
     const previous = previousSurfaces.find((item) => item.id === surface.id) ?? previousSurfaces.find((item) => item.sourceRef && item.sourceRef === surface.sourceRef);
@@ -1998,7 +2195,7 @@ function mergeSurfaceAssignments(nextSurfaces: Surface[], previousSurfaces: Surf
     const previousBaseZone = previous?.zones[0];
     const materialId = previousMaterialId && materialIds.has(previousMaterialId) ? previousMaterialId : fallbackMaterialId;
     const extraZones =
-      previous?.type === surface.type
+      carryOverExtraZones && previous?.type === surface.type
         ? previous.zones.slice(1).map((zone) => ({
             ...zone,
             materialId: zone.materialId && materialIds.has(zone.materialId) ? zone.materialId : materialId,
@@ -2356,6 +2553,7 @@ function createFloorZone(surface: Surface, materialId: string | null, settings: 
       stagger: 'none' as const,
       rotation: 0 as const,
       angleDeg: 0 as const,
+      turnDeg: 0,
       groutMm: settings.groutMm,
       originXmm: 0,
       originYmm: 0,
@@ -2418,6 +2616,11 @@ function getAvailableMaterialId(materials: TileMaterial[], preferredId: string):
 
 function clampTileSize(value: number): number {
   return Math.max(50, Math.min(3200, Math.round(value)));
+}
+
+function clampGroutMm(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.max(0, Math.min(50, Math.round(value * 10) / 10));
 }
 
 function clampLayoutOffset(value: number): number {

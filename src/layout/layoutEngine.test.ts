@@ -64,6 +64,15 @@ describe('layout engine', () => {
     });
 
     expect(result.pieces.map((piece) => piece.xMm)).toEqual([0, 610]);
+
+    const halfMillimetre = generateRectLayout({
+      heightMm: 600,
+      layout: { ...layout, groutMm: 0.5 },
+      tileHeightMm: 600,
+      tileWidthMm: 600,
+      widthMm: 1201,
+    });
+    expect(halfMillimetre.pieces.map((piece) => piece.xMm)).toEqual([0, 600.5]);
   });
 
   it('swaps tile sides when rotation is 90 degrees', () => {
@@ -276,6 +285,142 @@ describe('layout engine', () => {
     expect(herringbone.pieces.some((piece) => piece.id.includes('-horizontal'))).toBe(true);
     expect(herringbone.pieces.some((piece) => piece.id.includes('-vertical'))).toBe(true);
     expect(herringbone.fullCount).toBeGreaterThan(0);
+  });
+
+  it('applies deck stagger=half as stepY/2 between neighboring columns', () => {
+    const tileHeightMm = 1200;
+    const tileWidthMm = 600;
+    const stepY = tileHeightMm;
+    const deckHalf = generateRectLayout({
+      heightMm: 2400,
+      layout: { ...layout, groutMm: 0, pattern: 'wood-random', stagger: 'half' },
+      tileHeightMm,
+      tileWidthMm,
+      widthMm: 1200,
+    });
+
+    const col0Full = deckHalf.pieces
+      .filter((p) => p.col === 0 && p.heightMm === tileHeightMm)
+      .sort((a, b) => a.yMm - b.yMm)[0];
+    const col1Full = deckHalf.pieces
+      .filter((p) => p.col === 1 && p.heightMm === tileHeightMm)
+      .sort((a, b) => a.yMm - b.yMm)[0];
+
+    expect(col0Full?.yMm).toBe(0);
+    expect(col1Full?.yMm).toBe(stepY / 2);
+  });
+
+  it('applies herringbone stagger using normalized row phase', () => {
+    const base = generateRectLayout({
+      heightMm: 1500,
+      layout: { ...layout, groutMm: 2, pattern: 'herringbone', stagger: 'none' },
+      tileHeightMm: 600,
+      tileWidthMm: 200,
+      widthMm: 1500,
+    });
+    const third = generateRectLayout({
+      heightMm: 1500,
+      layout: { ...layout, groutMm: 2, pattern: 'herringbone', stagger: 'third' },
+      tileHeightMm: 600,
+      tileWidthMm: 200,
+      widthMm: 1500,
+    });
+
+    const baseSignature = base.pieces.slice(0, 25).map((piece) => `${Math.round(piece.xMm)}:${Math.round(piece.yMm)}`).join('|');
+    const thirdSignature = third.pieces.slice(0, 25).map((piece) => `${Math.round(piece.xMm)}:${Math.round(piece.yMm)}`).join('|');
+    expect(thirdSignature).not.toBe(baseSignature);
+  });
+
+  it('keeps herringbone stagger deterministic for all offset modes', () => {
+    const run = (stagger: LayoutSettings['stagger']) => generateRectLayout({
+      heightMm: 1500,
+      layout: { ...layout, groutMm: 2, pattern: 'herringbone', stagger },
+      tileHeightMm: 600,
+      tileWidthMm: 200,
+      widthMm: 1500,
+    });
+
+    const noneA = run('none');
+    const noneB = run('none');
+    const half = run('half');
+    const third = run('third');
+    const quarter = run('quarter');
+
+    const signature = (result: ReturnType<typeof generateRectLayout>) =>
+      result.pieces.slice(0, 40).map((piece) => `${Math.round(piece.xMm)}:${Math.round(piece.yMm)}`).join('|');
+
+    expect(signature(noneA)).toBe(signature(noneB));
+    expect(signature(half)).not.toBe(signature(noneA));
+    expect(signature(third)).not.toBe(signature(noneA));
+    expect(signature(quarter)).not.toBe(signature(noneA));
+  });
+
+  it('keeps herringbone area coverage stable across stagger modes', () => {
+    const make = (stagger: LayoutSettings['stagger']) => generateRectLayout({
+      heightMm: 3200,
+      layout: { ...layout, groutMm: 2, pattern: 'herringbone', stagger },
+      tileHeightMm: 600,
+      tileWidthMm: 200,
+      widthMm: 3200,
+    });
+    const none = make('none');
+    const half = make('half');
+    const third = make('third');
+    const quarter = make('quarter');
+
+    const area = (result: ReturnType<typeof generateRectLayout>) =>
+      result.pieces.reduce((sum, piece) => sum + (piece.areaMm2 ?? piece.widthMm * piece.heightMm), 0);
+
+    const baseArea = area(none);
+    const withinFivePercent = (value: number) => Math.abs(value - baseArea) / baseArea < 0.05;
+
+    expect(withinFivePercent(area(half))).toBe(true);
+    expect(withinFivePercent(area(third))).toBe(true);
+    expect(withinFivePercent(area(quarter))).toBe(true);
+  });
+
+  it('returns non-zero edge offsets for herringbone cuts', () => {
+    const result = generateRectLayout({
+      heightMm: 1500,
+      layout: { ...layout, groutMm: 2, pattern: 'herringbone', stagger: 'half' },
+      tileHeightMm: 600,
+      tileWidthMm: 200,
+      widthMm: 1500,
+    });
+    expect(result.edgeOffsets.top).not.toBeNull();
+    expect(result.edgeOffsets.right).not.toBeNull();
+    expect(result.edgeOffsets.bottom).not.toBeNull();
+    expect(result.edgeOffsets.left).not.toBeNull();
+  });
+
+  it('rotates the layout around the surface center and clips tiles to the surface', () => {
+    const turned = generateRectLayout({
+      heightMm: 1200,
+      layout: { ...layout, groutMm: 0, turnDeg: 25 },
+      tileHeightMm: 600,
+      tileWidthMm: 600,
+      widthMm: 1800,
+    });
+    const untilted = generateRectLayout({
+      heightMm: 1200,
+      layout: { ...layout, groutMm: 0, turnDeg: 0 },
+      tileHeightMm: 600,
+      tileWidthMm: 600,
+      widthMm: 1800,
+    });
+
+    expect(turned.pieces.length).toBeGreaterThan(0);
+    expect(turned.pieces.some((piece) => (piece.polygon?.length ?? 0) >= 3)).toBe(true);
+    expect(turned.pieces.every((piece) => {
+      const polygon = piece.polygon ?? [
+        { x: piece.xMm, y: piece.yMm },
+        { x: piece.xMm + piece.widthMm, y: piece.yMm },
+        { x: piece.xMm + piece.widthMm, y: piece.yMm + piece.heightMm },
+        { x: piece.xMm, y: piece.yMm + piece.heightMm },
+      ];
+      return polygon.every((point) => point.x >= -0.6 && point.x <= 1800.6 && point.y >= -0.6 && point.y <= 1200.6);
+    })).toBe(true);
+    expect(untilted.pieces.every((piece) => !piece.polygon?.length)).toBe(true);
   });
 
   it('clips pieces around blocked rectangles such as doors', () => {

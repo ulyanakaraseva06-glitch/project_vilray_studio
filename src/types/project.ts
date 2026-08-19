@@ -43,6 +43,8 @@ export interface LayoutSettings {
   stagger?: LayoutStagger;
   rotation: 0 | 90;
   angleDeg?: 0 | 45;
+  /** Free rotation of the whole layout around the surface center, in degrees. */
+  turnDeg?: number;
   groutMm: number;
   originXmm: number;
   originYmm: number;

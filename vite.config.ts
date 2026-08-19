@@ -4,7 +4,20 @@ import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vite';
 
 const config = {
-  plugins: [react()],
+  plugins: [
+    react({
+      // App.tsx is large enough that the esbuild-only path can fail silently in dev
+      // and produce an empty module (white screen). Always run Babel for TS/TSX.
+      babel: {
+        plugins: [
+          {
+            name: 'force-tsx-babel-transform',
+            visitor: {},
+          },
+        ],
+      },
+    }),
+  ],
   build: {
     rollupOptions: {
       input: {

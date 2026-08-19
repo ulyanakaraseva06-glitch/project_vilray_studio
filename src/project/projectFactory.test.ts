@@ -32,6 +32,7 @@ import {
   moveOpening,
   movePartition,
   moveRoomObject,
+  openingRectsOverlap,
   resizeOpening,
   resetOpening,
   resetPartition,
@@ -51,7 +52,9 @@ import {
   updateSurfaceLayoutOffset,
   updateSurfaceLayoutOrigin,
   updateSurfaceTileMaterial,
+  updateZoneLayoutGrout,
   updateZoneLayoutOffset,
+  updateZoneLayoutTurn,
   updateZoneLayoutPattern,
   updateZoneLayoutStagger,
   updateZoneName,
@@ -199,6 +202,16 @@ describe('project factory', () => {
     expect(getSurfaceMaterial(changed, 'surface-floor')).toMatchObject({ presetId: '600x1200' });
   });
 
+  it('drops extra zones when recreating the primary room from another template', () => {
+    const rectangle = templates.find((template) => template.id === 'rectangle') ?? templates[0];
+    const lShape = templates.find((template) => template.id === 'l-shape') ?? templates[1];
+    const withExtraZone = addFloorZone(createProjectFromTemplate(rectangle, [1700, 2000]), 'rect');
+    expect(withExtraZone.surfaces.find((surface) => surface.id === 'surface-floor')?.zones).toHaveLength(2);
+
+    const recreated = createProjectFromTemplate(lShape, lShape.sizes[0], withExtraZone, true, false);
+    expect(recreated.surfaces.find((surface) => surface.id === 'surface-floor')?.zones).toHaveLength(1);
+  });
+
   it('updates layout origin mode for one surface', () => {
     const project = createProjectFromTemplate(templates[0], [1700, 2000]);
     const updated = updateSurfaceLayoutOrigin(project, 'surface-floor', 'tile-center');
@@ -273,6 +286,26 @@ describe('project factory', () => {
 
     expect(layout).toMatchObject({ originMode: 'manual', originXmm: 40, originYmm: 30 });
     expect(updated.surfaces.find((surface) => surface.id === 'surface-floor')?.zones[0]?.layout.originMode).toBe('corner-tl');
+  });
+
+  it('stores free layout turn around the surface center', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const zone = project.surfaces.find((surface) => surface.id === 'surface-floor')!.zones[0]!;
+    const updated = updateZoneLayoutTurn(project, 'surface-floor', zone.id, 18.4);
+    const layout = updated.surfaces.find((surface) => surface.id === 'surface-floor')?.zones[0]?.layout;
+
+    expect(layout?.turnDeg).toBe(18.4);
+    expect(layout?.originMode).toBe(zone.layout.originMode);
+  });
+
+  it('stores grout size for a zone and uses it as spacing between tiles', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const zone = project.surfaces.find((surface) => surface.id === 'surface-floor')!.zones[0]!;
+    const updated = updateZoneLayoutGrout(project, 'surface-floor', zone.id, 0.5);
+    const layout = updated.surfaces.find((surface) => surface.id === 'surface-floor')?.zones[0]?.layout;
+
+    expect(layout?.groutMm).toBe(0.5);
+    expect(updated.settings.groutMm).toBe(0.5);
   });
 
   it('adds wall zones and preserves them when room height changes', () => {
@@ -556,6 +589,47 @@ describe('project factory', () => {
 
     expect(resizedPassage.room.openings![0]).toMatchObject({ xMm: 100, yMm: 0, widthMm: 1100, heightMm: project.room.heightMm });
     expect(resizedDoor.room.openings![0]).toMatchObject({ xMm: 140, widthMm: 950, heightMm: 1800, yMm: project.room.heightMm - 1800 });
+  });
+
+  it('prevents overlapping openings on the same wall', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const withDoor = addOpening(project, 'surface-wall-1', 'door');
+    const door = withDoor.room.openings![0];
+    const withSecondDoor = addOpeningDetailed(withDoor, 'surface-wall-1', 'door');
+    expect(withSecondDoor.opening).not.toBeNull();
+    expect(withSecondDoor.opening!.xMm).not.toBe(door.xMm);
+
+    const overlapMove = moveOpening(withSecondDoor.project, door.id, withSecondDoor.opening!.xMm);
+    expect(overlapMove.room.openings!.find((item) => item.id === door.id)!.xMm).not.toBe(withSecondDoor.opening!.xMm);
+
+    const overlapResize = resizeOpening(withSecondDoor.project, door.id, {
+      xMm: withSecondDoor.opening!.xMm,
+      yMm: door.yMm,
+      widthMm: door.widthMm + 200,
+      heightMm: door.heightMm,
+    });
+    expect(overlapResize.room.openings!.find((item) => item.id === door.id)!.widthMm).toBe(door.widthMm);
+
+    const withWindow = addOpening(withSecondDoor.project, 'surface-wall-1', 'window');
+    const window = withWindow.room.openings!.find((item) => item.kind === 'window')!;
+    const overlapWindowMove = moveOpening(withWindow, window.id, door.xMm, door.yMm);
+    expect(overlapWindowMove.room.openings!.find((item) => item.id === window.id)!.xMm).toBe(window.xMm);
+  });
+
+  it('allows adjacent openings on the same wall', () => {
+    const project = createProjectFromTemplate(templates[0], [1700, 2000]);
+    const withDoor = addOpening(project, 'surface-wall-1', 'door');
+    const door = withDoor.room.openings![0];
+    const withSecondDoor = addOpeningDetailed(withDoor, 'surface-wall-1', 'door');
+    const secondDoor = withSecondDoor.opening!;
+    expect(secondDoor).toBeTruthy();
+    expect(openingRectsOverlap(door, secondDoor)).toBe(false);
+
+    const adjacentX = secondDoor.xMm + secondDoor.widthMm;
+    const moved = moveOpening(withSecondDoor.project, door.id, adjacentX);
+    const movedDoor = moved.room.openings!.find((item) => item.id === door.id)!;
+    expect(movedDoor.xMm).toBe(adjacentX);
+    expect(openingRectsOverlap(movedDoor, secondDoor)).toBe(false);
   });
 
   it('creates two wall faces for a partition and supports move, reset and delete', () => {

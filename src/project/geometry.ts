@@ -314,8 +314,14 @@ export function hasSelfIntersections(points: PointMm[]): boolean {
     const firstNext = (first + 1) % points.length;
     for (let second = first + 1; second < points.length; second += 1) {
       const secondNext = (second + 1) % points.length;
-      if (first === second || firstNext === second || secondNext === first) continue;
-      if (segmentsIntersect(points[first], points[firstNext], points[second], points[secondNext])) return true;
+      const adjacent = first === second || firstNext === second || secondNext === first;
+      if (adjacent) {
+        // Adjacent edges are allowed to touch only at the shared vertex.
+        // Any overlap/crossing beyond the vertex must be rejected.
+        if (segmentsIntersectIgnoringSharedEndpoint(points[first], points[firstNext], points[second], points[secondNext])) return true;
+      } else if (segmentsIntersect(points[first], points[firstNext], points[second], points[secondNext])) {
+        return true;
+      }
     }
   }
   return false;
@@ -343,6 +349,47 @@ export function segmentsIntersect(a: PointMm, b: PointMm, c: PointMm, d: PointMm
   if (cdA === 0 && onSegment(c, d, a)) return true;
   if (cdB === 0 && onSegment(c, d, b)) return true;
   return Math.sign(abC) !== Math.sign(abD) && Math.sign(cdA) !== Math.sign(cdB);
+}
+
+function pointsEqual(a: PointMm, b: PointMm): boolean {
+  return a.x === b.x && a.y === b.y;
+}
+
+function pointOnSegmentStrict(a: PointMm, b: PointMm, point: PointMm): boolean {
+  if (!onSegment(a, b, point)) return false;
+  if (pointsEqual(a, point)) return false;
+  if (pointsEqual(b, point)) return false;
+  return true;
+}
+
+function segmentsProperlyIntersect(a: PointMm, b: PointMm, c: PointMm, d: PointMm): boolean {
+  const cross = (p: PointMm, q: PointMm, r: PointMm) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const abC = cross(a, b, c);
+  const abD = cross(a, b, d);
+  const cdA = cross(c, d, a);
+  const cdB = cross(c, d, b);
+  // Proper crossing only happens when all orientations are non-zero.
+  if (abC === 0 || abD === 0 || cdA === 0 || cdB === 0) return false;
+  return Math.sign(abC) !== Math.sign(abD) && Math.sign(cdA) !== Math.sign(cdB);
+}
+
+function segmentsIntersectIgnoringSharedEndpoint(a: PointMm, b: PointMm, c: PointMm, d: PointMm): boolean {
+  if (!segmentsIntersect(a, b, c, d)) return false;
+
+  // Any interior crossing is invalid regardless of shared vertices.
+  if (segmentsProperlyIntersect(a, b, c, d)) return true;
+
+  // If any endpoint lies strictly inside the other segment — it is an overlap ("wall enters wall").
+  if (
+    pointOnSegmentStrict(c, d, a)
+    || pointOnSegmentStrict(c, d, b)
+    || pointOnSegmentStrict(a, b, c)
+    || pointOnSegmentStrict(a, b, d)
+  ) return true;
+
+  // Otherwise, intersection can only be at shared endpoints.
+  const sharesEndpoint = pointsEqual(a, c) || pointsEqual(a, d) || pointsEqual(b, c) || pointsEqual(b, d);
+  return !sharesEndpoint;
 }
 
 export function isSegmentWithinContour(contour: PointMm[], start: PointMm, end: PointMm): boolean {
@@ -448,6 +495,7 @@ function createDefaultLayout(settings?: ProjectSettings): LayoutSettings {
     stagger: 'none',
     rotation: 0,
     angleDeg: 0,
+    turnDeg: 0,
     groutMm: settings?.groutMm ?? 2,
     originXmm: 0,
     originYmm: 0,

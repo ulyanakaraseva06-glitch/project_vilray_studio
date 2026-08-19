@@ -101,6 +101,17 @@ describe('custom room drawing', () => {
     expect(validateDraftPoint(points, { x: 1000, y: 0 })).toBe('Линии помещения не могут пересекаться.');
   });
 
+  it('rejects closing a contour that overlaps the first wall (shared endpoint is not enough)', () => {
+    // Closing segment (last -> first) is collinear with the first wall and overlaps it beyond the shared vertex.
+    const points = [
+      { x: 0, y: 0 }, // first
+      { x: 1000, y: 0 },
+      { x: 1000, y: 500 },
+      { x: 500, y: 0 }, // last (previous point)
+    ];
+    expect(validateDraftPoint(points, { x: 0, y: 0 })).toBe('Линии помещения не могут пересекаться.');
+  });
+
   it('allows the last point to match the first point and closes the contour', () => {
     const points = [{ x: 100, y: 100 }, { x: 1100, y: 100 }, { x: 1100, y: 1100 }];
     expect(validateDraftPoint(points, { x: 100, y: 100 })).toBeNull();
